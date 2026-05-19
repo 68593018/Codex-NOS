@@ -4,6 +4,7 @@ LDFLAGS = -lpthread -ldl -rdynamic -Wl,--gc-sections
 PYTHON = python3
 GEN_SCRIPT = scripts/gen_manifest.py
 CONFIG_DIR = conf
+HEADERS = $(wildcard include/*.h)
 
 # 核心通用源码
 CORE_SRCS = src/core/nos_scheduler.c \
@@ -32,7 +33,7 @@ include/nos_ids.h: $(shell find $(CONFIG_DIR) -name "*.yaml") $(GEN_SCRIPT)
 	@$(PYTHON) $(GEN_SCRIPT) $(CONFIG_DIR) include/nos_ids.h
 
 # 通用编译规则：.c -> .o
-%.o: %.c include/nos_ids.h
+%.o: %.c include/nos_ids.h $(HEADERS)
 	@echo "Compiling $<..."
 	@$(CC) $(CFLAGS) -c $< -o $@
 
@@ -46,23 +47,23 @@ nos_ProcB: $(CORE_OBJS) src/core/manifest_ProcB.o
 	@$(CC) $^ -o $@ $(LDFLAGS)
 
 # 组件编译规则：适配 src/components/model_N/model_N.c 结构
-libcomp-1.so: src/components/model_1/model_1.c include/nos_ids.h
+libcomp-1.so: src/components/model_1/model_1.c include/nos_ids.h $(HEADERS)
 	@$(CC) $(CFLAGS) -shared $< -o $@
-libcomp-2.so: src/components/model_2/model_2.c include/nos_ids.h
+libcomp-2.so: src/components/model_2/model_2.c include/nos_ids.h $(HEADERS)
 	@$(CC) $(CFLAGS) -shared $< -o $@
-libcomp-3.so: src/components/model_3/model_3.c include/nos_ids.h
+libcomp-3.so: src/components/model_3/model_3.c include/nos_ids.h $(HEADERS)
 	@$(CC) $(CFLAGS) -shared $< -o $@
-libcomp-4.so: src/components/model_4/model_4.c include/nos_ids.h
+libcomp-4.so: src/components/model_4/model_4.c include/nos_ids.h $(HEADERS)
 	@$(CC) $(CFLAGS) -shared $< -o $@
-libcomp-5.so: src/components/model_5/model_5.c include/nos_ids.h
+libcomp-5.so: src/components/model_5/model_5.c include/nos_ids.h $(HEADERS)
 	@$(CC) $(CFLAGS) -shared $< -o $@
-libcomp-ping.so: src/components/perf/ping.c include/nos_ids.h
+libcomp-ping.so: src/components/perf/ping.c include/nos_ids.h $(HEADERS)
 	@$(CC) $(CFLAGS) -shared $< -o $@
-libcomp-pong.so: src/components/perf/pong.c include/nos_ids.h
+libcomp-pong.so: src/components/perf/pong.c include/nos_ids.h $(HEADERS)
 	@$(CC) $(CFLAGS) -shared $< -o $@
-libcomp-rping.so: src/components/perf/remote_ping.c include/nos_ids.h
+libcomp-rping.so: src/components/perf/remote_ping.c include/nos_ids.h $(HEADERS)
 	@$(CC) $(CFLAGS) -shared $< -o $@
-libcomp-rpong.so: src/components/perf/remote_pong.c include/nos_ids.h
+libcomp-rpong.so: src/components/perf/remote_pong.c include/nos_ids.h $(HEADERS)
 	@$(CC) $(CFLAGS) -shared $< -o $@
 
 clean:

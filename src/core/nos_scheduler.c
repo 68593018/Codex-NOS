@@ -49,6 +49,7 @@ struct nos_timer_s {
     nos_timer_free_arg_t free_arg;
     void    *arg;
     int      is_running;
+    nos_component_t *owner;
     nos_thread_t *owner_thread; // 归属线程
 };
 
@@ -85,22 +86,36 @@ static void heapify_down(nos_thread_t *thread, uint32_t idx) {
 }
 
 static void process_timers(nos_thread_t *self) {
-    uint64_t now = get_monotonic_ms();
-    while (self->timer_heap.size > 0 && now >= self->timer_heap.nodes[0]->expire_at_ms) {
+    while (1) {
+        uint64_t now = get_monotonic_ms();
+        pthread_mutex_lock(&self->timer_lock);
+        if (self->timer_heap.size == 0 || now < self->timer_heap.nodes[0]->expire_at_ms) {
+            pthread_mutex_unlock(&self->timer_lock);
+            break;
+        }
         nos_timer_t *timer = self->timer_heap.nodes[0];
         self->timer_heap.nodes[0] = self->timer_heap.nodes[--self->timer_heap.size];
         heapify_down(self, 0);
         timer->is_running = 0;
+        pthread_mutex_unlock(&self->timer_lock);
 
-        if (timer->callback) timer->callback(timer->arg);
+        if (timer->owner && timer->owner->status == NOS_COMP_ST_ACTIVE && timer->callback) {
+            timer->callback(timer->arg);
+        }
 
-        if (timer->is_periodic) {
+        if (timer->is_periodic && timer->owner && timer->owner->status == NOS_COMP_ST_ACTIVE) {
             timer->expire_at_ms = get_monotonic_ms() + timer->interval_ms;
+            pthread_mutex_lock(&self->timer_lock);
+            if (self->timer_heap.size >= self->timer_heap.capacity) {
+                timer->is_running = 0;
+                pthread_mutex_unlock(&self->timer_lock);
+                continue;
+            }
             timer->is_running = 1;
             self->timer_heap.nodes[self->timer_heap.size] = timer;
             heapify_up(self, self->timer_heap.size++);
+            pthread_mutex_unlock(&self->timer_lock);
         }
-        now = get_monotonic_ms();
     }
 }
 
@@ -139,6 +154,7 @@ nos_status_t nos_scheduler_init_thread(nos_thread_t *thread, uint32_t id, const 
     atomic_init(&thread->is_sleeping, 0);
     pthread_mutex_init(&thread->queue_lock, NULL);
     pthread_mutex_init(&thread->component_lock, NULL);
+    pthread_mutex_init(&thread->timer_lock, NULL);
     thread->epoll_fd = epoll_create1(0);
 
     thread->notify_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -177,6 +193,7 @@ void nos_scheduler_deinit_thread(nos_thread_t *thread) {
     pthread_mutex_unlock(&thread->queue_lock);
     pthread_mutex_destroy(&thread->queue_lock);
     pthread_mutex_destroy(&thread->component_lock);
+    pthread_mutex_destroy(&thread->timer_lock);
 
 
     /* 3. 释放定时器堆中的定时器 (由框架创建的容器，内部 timer 需由组件释放或在此兜底) */
@@ -265,6 +282,75 @@ nos_status_t nos_scheduler_unregister_component(nos_thread_t *thread, nos_compon
     }
     pthread_mutex_unlock(&thread->component_lock);
     return NOS_ERR;
+}
+
+void nos_scheduler_cancel_timers_by_owner(nos_thread_t *thread, nos_component_t *owner) {
+    if (!thread || !owner) return;
+
+    pthread_mutex_lock(&thread->timer_lock);
+    uint32_t write_idx = 0;
+    for (uint32_t read_idx = 0; read_idx < thread->timer_heap.size; read_idx++) {
+        nos_timer_t *timer = thread->timer_heap.nodes[read_idx];
+        if (timer && timer->owner == owner) {
+            timer->is_running = 0;
+            timer->owner = NULL;
+            timer->owner_thread = NULL;
+            continue;
+        }
+        thread->timer_heap.nodes[write_idx++] = timer;
+    }
+    thread->timer_heap.size = write_idx;
+    for (int i = (int)thread->timer_heap.size / 2 - 1; i >= 0; i--) {
+        heapify_down(thread, (uint32_t)i);
+    }
+    pthread_mutex_unlock(&thread->timer_lock);
+}
+
+void nos_scheduler_drop_messages_for_provider(nos_thread_t *thread, nos_component_t *provider) {
+    if (!thread || !provider) return;
+    extern nos_node_ctx_t g_node_ctx;
+
+    pthread_mutex_lock(&thread->queue_lock);
+    int new_head = 0;
+    int new_tail = 0;
+    nos_buffer_t **new_queue = calloc(MAX_QUEUE_SIZE, sizeof(nos_buffer_t*));
+    if (!new_queue) {
+        pthread_mutex_unlock(&thread->queue_lock);
+        return;
+    }
+
+    while (thread->head != thread->tail) {
+        nos_buffer_t *buf = thread->msg_queue[thread->head];
+        thread->head = (thread->head + 1) % MAX_QUEUE_SIZE;
+
+        nos_service_msg_t *header = (nos_service_msg_t *)buf->data;
+        service_entry_t *entry = find_service_entry(header->dst_service);
+        int targets_provider = (entry && !entry->is_remote && entry->local_provider == provider);
+        if (!targets_provider && g_node_ctx.node_def) {
+            for (uint32_t i = 0; i < g_node_ctx.node_def->service_count; i++) {
+                const nos_service_def_t *svc = &g_node_ctx.node_def->services[i];
+                if (svc->service_id == header->dst_service &&
+                    svc->provider_comp_id == provider->id &&
+                    strcmp(svc->node_name, g_node_ctx.node_def->name) == 0) {
+                    targets_provider = 1;
+                    break;
+                }
+            }
+        }
+        if (targets_provider) {
+            nos_buffer_release(buf);
+            continue;
+        }
+
+        new_queue[new_tail] = buf;
+        new_tail = (new_tail + 1) % MAX_QUEUE_SIZE;
+    }
+
+    memcpy(thread->msg_queue, new_queue, MAX_QUEUE_SIZE * sizeof(nos_buffer_t*));
+    thread->head = new_head;
+    thread->tail = new_tail;
+    free(new_queue);
+    pthread_mutex_unlock(&thread->queue_lock);
 }
 
 nos_status_t nos_service_unregister_provider(uint32_t service_id) {
@@ -471,11 +557,17 @@ nos_timer_t* nos_timer_create(nos_timer_cb_t cb, void *arg, nos_timer_free_arg_t
 
 nos_status_t nos_timer_start(nos_component_t *self, nos_timer_t *timer, uint32_t interval_ms, int is_periodic) {
     nos_thread_t *thread = find_thread_of_component(self);
-    if (!thread || !timer || timer->is_running || thread->timer_heap.size >= thread->timer_heap.capacity) return NOS_ERR;
+    if (!thread || !timer || timer->is_running) return NOS_ERR;
+    pthread_mutex_lock(&thread->timer_lock);
+    if (thread->timer_heap.size >= thread->timer_heap.capacity) {
+        pthread_mutex_unlock(&thread->timer_lock);
+        return NOS_ERR;
+    }
     timer->interval_ms = interval_ms; timer->expire_at_ms = get_monotonic_ms() + interval_ms;
-    timer->is_periodic = is_periodic; timer->is_running = 1; timer->owner_thread = thread;
+    timer->is_periodic = is_periodic; timer->is_running = 1; timer->owner = self; timer->owner_thread = thread;
     thread->timer_heap.nodes[thread->timer_heap.size] = timer;
     heapify_up(thread, thread->timer_heap.size++);
+    pthread_mutex_unlock(&thread->timer_lock);
     
     uint64_t val = 1;
     if (write(thread->notify_fd, &val, sizeof(val)) < 0) { /* Ignore */ }
@@ -483,15 +575,23 @@ nos_status_t nos_timer_start(nos_component_t *self, nos_timer_t *timer, uint32_t
 }
 
 nos_status_t nos_timer_stop(nos_component_t *self, nos_timer_t *timer) {
+    if (!timer) return NOS_ERR;
     nos_thread_t *thread = timer->owner_thread; // 优先使用自持的线程上下文
     if (!thread) thread = find_thread_of_component(self);
-    if (!thread || !timer || !timer->is_running) return NOS_ERR;
+    if (!thread || !timer->is_running) return NOS_ERR;
+    pthread_mutex_lock(&thread->timer_lock);
     for (uint32_t i = 0; i < thread->timer_heap.size; i++) {
         if (thread->timer_heap.nodes[i] == timer) {
             thread->timer_heap.nodes[i] = thread->timer_heap.nodes[--thread->timer_heap.size];
-            heapify_down(thread, i); timer->is_running = 0; return NOS_OK;
+            heapify_down(thread, i);
+            timer->is_running = 0;
+            timer->owner = NULL;
+            timer->owner_thread = NULL;
+            pthread_mutex_unlock(&thread->timer_lock);
+            return NOS_OK;
         }
     }
+    pthread_mutex_unlock(&thread->timer_lock);
     return NOS_ERR;
 }
 
@@ -499,13 +599,18 @@ void nos_timer_delete(nos_timer_t *timer) {
     if (!timer) return;
     if (timer->is_running && timer->owner_thread) {
         nos_thread_t *t = timer->owner_thread;
+        pthread_mutex_lock(&t->timer_lock);
         for (uint32_t i = 0; i < t->timer_heap.size; i++) {
             if (t->timer_heap.nodes[i] == timer) {
                 t->timer_heap.nodes[i] = t->timer_heap.nodes[--t->timer_heap.size];
                 heapify_down(t, i); break;
             }
         }
+        pthread_mutex_unlock(&t->timer_lock);
     }
+    timer->is_running = 0;
+    timer->owner = NULL;
+    timer->owner_thread = NULL;
     if (timer->free_arg) timer->free_arg(timer->arg);
     free(timer);
 }

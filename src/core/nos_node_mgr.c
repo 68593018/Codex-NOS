@@ -21,13 +21,27 @@ static void node_destroy_loaded_component(nos_component_t *comp, void *handle) {
         return;
     }
 
-    if (comp->status == NOS_COMP_ST_ACTIVE && comp->stop) {
-        comp->stop(comp);
+    if (comp->status != NOS_COMP_ST_STOPPED) {
+        comp->status = NOS_COMP_ST_STOPPED;
+        if (comp->stop) comp->stop(comp);
     }
-    comp->status = NOS_COMP_ST_STOPPED;
     free((void*)comp->name);
     free(comp);
     if (handle) dlclose(handle);
+}
+
+static void node_stop_component_instance(loaded_comp_info_t *info) {
+    if (!info || !info->comp) return;
+
+    int should_call_stop = (info->comp->status != NOS_COMP_ST_STOPPED);
+    info->comp->status = NOS_COMP_ST_STOPPED;
+
+    if (info->owner_thread) {
+        nos_scheduler_drop_messages_for_provider(info->owner_thread, info->comp);
+        nos_scheduler_cancel_timers_by_owner(info->owner_thread, info->comp);
+    }
+
+    if (should_call_stop && info->comp->stop) info->comp->stop(info->comp);
 }
 
 static nos_component_t* node_load_component_staged(uint32_t id, const char *name, const char *lib_name, void **out_handle) {
@@ -188,6 +202,7 @@ nos_status_t node_unload_component(const char *name) {
     loaded_comp_info_t *info = &g_node_ctx.loaded_info[idx];
     nos_scheduler_unregister_component(info->owner_thread, info->comp);
     node_unregister_local_providers(info->comp->id);
+    node_stop_component_instance(info);
     node_destroy_loaded_component(info->comp, info->handle);
 
     for (uint32_t i = idx; i < g_node_ctx.loaded_count - 1; i++) g_node_ctx.loaded_info[i] = g_node_ctx.loaded_info[i+1];
@@ -239,8 +254,13 @@ nos_status_t node_reload_component(const char *name) {
     old_info->owner_thread = thread;
     node_register_local_providers(id, new_comp, thread);
 
-    if (old_comp->stop) old_comp->stop(old_comp);
-    old_comp->status = NOS_COMP_ST_STOPPED;
+    loaded_comp_info_t old_tmp = {
+        .comp = old_comp,
+        .handle = old_handle,
+        .lib_name = lib_name,
+        .owner_thread = thread,
+    };
+    node_stop_component_instance(&old_tmp);
     free((void*)old_comp->name);
     free(old_comp);
     dlclose(old_handle);

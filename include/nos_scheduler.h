@@ -51,6 +51,7 @@ typedef struct nos_thread_s {
     nos_fd_entry_t *fd_entries;
     uint32_t fd_count;
 
+    pthread_mutex_t timer_lock; /**< 定时器堆锁 */
     nos_timer_heap_t timer_heap; /**< 本地定时器堆 */
 
     /**
@@ -84,6 +85,16 @@ nos_status_t nos_scheduler_register_component(nos_thread_t *thread, nos_componen
  * @brief 从调度器注销组件
  */
 nos_status_t nos_scheduler_unregister_component(nos_thread_t *thread, nos_component_t *comp);
+
+/**
+ * @brief 清理目标组件拥有的定时器
+ */
+void nos_scheduler_cancel_timers_by_owner(nos_thread_t *thread, nos_component_t *owner);
+
+/**
+ * @brief 丢弃队列中仍会投递到目标 provider 的消息
+ */
+void nos_scheduler_drop_messages_for_provider(nos_thread_t *thread, nos_component_t *provider);
 
 /**
  * @brief 启动调度循环

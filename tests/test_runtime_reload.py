@@ -107,6 +107,23 @@ class RuntimeReloadTest(unittest.TestCase):
         after_unload = output.split("Component Comp-Pong unloaded.", 1)[1]
         self.assertNotRegex(after_unload, r"Comp-Pong\s+11\s+Active")
 
+    def test_unload_component_with_timer_keeps_runtime_usable(self):
+        rc, output = self.run_node_commands([
+            "show components",
+            "unload Comp-1",
+            "show components",
+            "show memory",
+            "log stats",
+        ])
+
+        self.assertEqual(rc, 0, output)
+        self.assertRegex(output, r"Comp-1\s+1\s+Active")
+        self.assertIn("Component Comp-1 unloaded.", output)
+        after_unload = output.split("Component Comp-1 unloaded.", 1)[1]
+        self.assertNotRegex(after_unload, r"Comp-1\s+1\s+Active")
+        self.assertIn("NOS Process Memory Consumption", after_unload)
+        self.assertIn("NOS Logging Statistics", after_unload)
+
 
 if __name__ == "__main__":
     unittest.main()
