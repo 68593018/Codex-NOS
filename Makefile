@@ -27,7 +27,7 @@ COMP_LIBS = libcomp-1.so libcomp-2.so libcomp-3.so libcomp-4.so libcomp-5.so \
             libcomp-ping.so libcomp-pong.so \
             libcomp-rping.so libcomp-rpong.so
 
-all: include/nos_ids.h $(COMP_LIBS) nos_ProcA nos_ProcB
+all: include/nos_ids.h $(COMP_LIBS) nos_ProcA nos_ProcB nos_mgr
 
 include/nos_ids.h: $(shell find $(CONFIG_DIR) -name "*.yaml") $(GEN_SCRIPT)
 	@echo "Generating manifests and ID headers..."
@@ -46,6 +46,10 @@ nos_ProcA: $(CORE_OBJS) src/core/manifest_ProcA.o
 nos_ProcB: $(CORE_OBJS) src/core/manifest_ProcB.o
 	@echo "Linking binary $@..."
 	@$(CC) $^ -o $@ $(LDFLAGS)
+
+nos_mgr: src/mgr/nos_mgr_main.o src/mgr/manifest_mgr.o
+	@echo "Linking binary $@..."
+	@$(CC) $^ -o $@
 
 # 组件编译规则：适配 src/components/model_N/model_N.c 结构
 libcomp-1.so: src/components/model_1/model_1.c include/nos_ids.h $(HEADERS)
@@ -68,7 +72,7 @@ libcomp-rpong.so: src/components/perf/remote_pong.c include/nos_ids.h $(HEADERS)
 	@$(CC) $(CFLAGS) -shared $< -o $@
 
 clean:
-	rm -f nos_Proc* libcomp-*.so include/nos_ids.h src/core/manifest_*.c src/core/*.o src/infra/*.o src/infra/*/*.o
+	rm -f nos_Proc* nos_mgr libcomp-*.so include/nos_ids.h src/core/manifest_*.c src/mgr/manifest_mgr.c src/core/*.o src/mgr/*.o src/infra/*.o src/infra/*/*.o
 
 test: all
 	@$(PYTHON) -m unittest discover -s tests

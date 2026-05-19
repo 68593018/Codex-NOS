@@ -4,13 +4,16 @@
 *.so
 *.d
 nos_Proc*
+nos_mgr
 libcomp-*.so
 
 # Generated from conf/*.yaml by scripts/gen_manifest.py
 include/nos_ids.h
 src/core/manifest_*.c
+src/mgr/manifest_mgr.c
 
 # Runtime artifacts
+logs/
 *.log
 *.pid
 /core

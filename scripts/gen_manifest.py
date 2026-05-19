@@ -271,6 +271,7 @@ def generate_header(comp_ids, svc_ids, header_path):
     with open(header_path, 'w') as f: f.write("\n".join(lines))
 
 def generate_node_manifest(node, output_path):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     c_content = ['#include <string.h>', '#include "nos_manifest.h"', '']
     for init_func in node["platform_inits"]: c_content.append(f'extern void {init_func}(void);')
     c_content.append('')
@@ -292,6 +293,18 @@ def generate_node_manifest(node, output_path):
     c_content.append('        { .name = NULL }\n    },')
     c_content.append(f'    .services = g_local_services, .service_count = {len(node["resolved_services"])}, .platform_inits = g_infra_inits\n}};')
     c_content.append('\nconst nos_node_def_t* nos_manifest_get_local(void) { return &g_local_node_def; }')
+    with open(output_path, 'w') as f: f.write("\n".join(c_content))
+
+def generate_mgr_manifest(nodes, output_path):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    c_content = ['#include <stddef.h>', '#include "nos_mgr.h"', '']
+    c_content.append('static const nos_mgr_node_def_t g_mgr_nodes[] = {')
+    for node in nodes:
+        name = node["name"]
+        c_content.append(f'    {{ .name = "{name}", .binary = "./nos_{name}", .uds_path = "{node["uds_path"]}" }},')
+    c_content.append('    { .name = NULL }\n};')
+    c_content.append('')
+    c_content.append('const nos_mgr_node_def_t* nos_mgr_manifest_get_nodes(void) { return g_mgr_nodes; }')
     with open(output_path, 'w') as f: f.write("\n".join(c_content))
 
 if __name__ == "__main__":
@@ -320,6 +333,8 @@ if __name__ == "__main__":
             out_c = os.path.join(os.path.dirname(out_h), f"manifest_{node['name']}.c").replace("include", "src/core")
             generate_node_manifest(node, out_c)
             print(node["name"], end=" ")
+        mgr_c = os.path.join(os.path.dirname(out_h), "manifest_mgr.c").replace("include", "src/mgr")
+        generate_mgr_manifest(master["nodes"], mgr_c)
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         sys.exit(2)

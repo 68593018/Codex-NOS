@@ -88,6 +88,9 @@ class GenManifestTest(unittest.TestCase):
                 "manifest": (src_core / "manifest_ProcA.c").read_text(encoding="utf-8")
                 if (src_core / "manifest_ProcA.c").exists()
                 else "",
+                "mgr_manifest": (root / "src" / "mgr" / "manifest_mgr.c").read_text(encoding="utf-8")
+                if (root / "src" / "mgr" / "manifest_mgr.c").exists()
+                else "",
             }
             return result, generated
 
@@ -99,6 +102,9 @@ class GenManifestTest(unittest.TestCase):
         self.assertIn("#define SVC_WORK", generated["header"])
         self.assertIn('.name = "ProcA"', generated["manifest"])
         self.assertIn("nos_log_init", generated["manifest"])
+        self.assertIn('nos_mgr_manifest_get_nodes', generated["mgr_manifest"])
+        self.assertIn('.name = "ProcA"', generated["mgr_manifest"])
+        self.assertIn('.binary = "./nos_ProcA"', generated["mgr_manifest"])
 
     def test_manifest_includes_required_remote_service_route(self):
         files = dict(BASE_CONFIG)
