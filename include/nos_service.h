@@ -7,6 +7,11 @@
 #define NOS_IPC_MAGIC   0x4E4F  /* "NO" */
 #define NOS_IPC_VERSION 0x01
 
+#define NOS_MSG_F_NEED_REPLY 0x00000001u
+#define NOS_MSG_F_REPLY      0x00000002u
+
+typedef struct nos_reply_ctx_s nos_reply_ctx_t;
+
 /**
  * @brief 远程服务消息信封 (Message Envelope)
  * @note 存放于 nos_buffer_t->data 的开头
@@ -16,6 +21,7 @@ typedef struct nos_service_msg_s {
     uint16_t version;          /**< 协议版本 */
     uint32_t dst_service;      /**< 目标服务 ID */
     uint32_t src_component;    /**< 发送者组件 ID */
+    uint32_t dst_component;    /**< 回复目标组件 ID，仅用于 REPLY */
     uint32_t msg_code;         /**< 业务操作码 */
     uint32_t seq;              /**< 序列号，用于可靠性跟踪 */
     uint32_t flags;            /**< 消息标志 (如是否通过共享内存) */
@@ -34,6 +40,10 @@ typedef struct {
  * @brief 远程服务 API (由系统总线提供)
  */
 nos_status_t nos_service_msg_send(nos_buffer_t *buf);
+nos_status_t nos_service_reply(nos_reply_ctx_t *ctx, nos_buffer_t *buf);
+nos_reply_ctx_t* nos_service_get_reply_ctx(nos_buffer_t *buf);
+void nos_reply_ctx_retain(nos_reply_ctx_t *ctx);
+void nos_reply_ctx_release(nos_reply_ctx_t *ctx);
 
 /**
  * @brief 注册远端服务路由信息

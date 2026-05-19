@@ -20,21 +20,25 @@ static uint64_t get_now_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
-static void send_ping(nos_component_t *self) {
+static void send_ping(nos_component_t *self, rping_ctx_t *ctx) {
     nos_buffer_t *buf = nos_buffer_alloc(sizeof(nos_service_msg_t), 0);
     if (buf) {
         nos_service_msg_t *msg = (nos_service_msg_t *)buf->data;
         msg->magic = NOS_IPC_MAGIC;
+        msg->version = NOS_IPC_VERSION;
         msg->dst_service = 114; // SVC_REMOTE_PONG
         msg->src_component = self->id;
         msg->msg_code = 2001; // PING
+        msg->seq = ctx ? ctx->current_count + 1 : 0;
+        msg->flags = NOS_MSG_F_NEED_REPLY;
         msg->payload_len = 0;
         nos_service_msg_send(buf);
         nos_buffer_release(buf);
     }
 }
 
-static void comp_on_msg(nos_component_t *self, const nos_service_msg_t *msg) {
+static void comp_on_msg(nos_component_t *self, nos_buffer_t *buf) {
+    const nos_service_msg_t *msg = (const nos_service_msg_t *)buf->data;
     rping_ctx_t *ctx = (rping_ctx_t *)self->priv;
 
     if (msg->msg_code == 3001) { // START_TEST from CLI
@@ -42,7 +46,7 @@ static void comp_on_msg(nos_component_t *self, const nos_service_msg_t *msg) {
         ctx->current_count = 0;
         nos_log_info(self, "Cross-Process Perf Test Started: %u iterations", ctx->target_count);
         ctx->start_time_ns = get_now_ns();
-        send_ping(self);
+        send_ping(self, ctx);
         return;
     }
 
@@ -52,7 +56,7 @@ static void comp_on_msg(nos_component_t *self, const nos_service_msg_t *msg) {
             nos_log_info(self, "Progress: %u/%u", ctx->current_count, ctx->target_count);
         }
         if (ctx->current_count < ctx->target_count) {
-            send_ping(self);
+            send_ping(self, ctx);
         } else {
             uint64_t end_time = get_now_ns();
             double total_sec = (double)(end_time - ctx->start_time_ns) / 1000000000.0;

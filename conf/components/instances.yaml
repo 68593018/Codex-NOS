@@ -86,4 +86,3 @@ components:
       - { name: "SVC_REMOTE_PONG", id: 114, type: "remote" }
     requires:
       - "SVC_LOG"
-      - "SVC_REMOTE_PING"

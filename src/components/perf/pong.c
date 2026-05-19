@@ -7,7 +7,8 @@
 #include "nos_ids.h"
 #include "nos_api.h"
 
-static void comp_on_msg(nos_component_t *self, const nos_service_msg_t *msg) {
+static void comp_on_msg(nos_component_t *self, nos_buffer_t *req_buf) {
+    const nos_service_msg_t *msg = (const nos_service_msg_t *)req_buf->data;
     if (msg->msg_code == 2001) { // PING
         nos_buffer_t *buf = nos_buffer_alloc(sizeof(nos_service_msg_t), 0);
         if (buf) {

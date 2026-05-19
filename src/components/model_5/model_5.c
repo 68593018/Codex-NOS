@@ -12,7 +12,8 @@ typedef struct {
     int counter;
 } comp_ctx_t;
 
-static void comp_on_msg(nos_component_t *self, const nos_service_msg_t *msg) {
+static void comp_on_msg(nos_component_t *self, nos_buffer_t *buf) {
+    const nos_service_msg_t *msg = (const nos_service_msg_t *)buf->data;
     comp_ctx_t *ctx = (comp_ctx_t *)self->priv;
     ctx->counter++;
     nos_log_info(self, "RECEIVED (Total: %d): From Component %u, MsgCode %u", 

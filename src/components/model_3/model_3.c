@@ -7,7 +7,8 @@
 #include "nos_ids.h"
 #include "nos_api.h"
 
-static void comp_on_msg(nos_component_t *self, const nos_service_msg_t *msg) {
+static void comp_on_msg(nos_component_t *self, nos_buffer_t *buf) {
+    const nos_service_msg_t *msg = (const nos_service_msg_t *)buf->data;
     /* 触发压力日志测试 */
     if (msg->msg_code == 3002) {
         uint32_t log_count = (msg->payload_len >= 4) ? *(uint32_t*)(msg + 1) : 2000;

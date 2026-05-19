@@ -7,6 +7,8 @@
 #include "nos_types.h"
 #include "nos_manifest.h"
 
+struct nos_reply_ctx_s;
+
 /**
  * @brief NOS 统一内存 Buffer 结构
  */
@@ -20,6 +22,7 @@ typedef struct {
     _Atomic int ref_cnt;       /**< 引用计数 (原子操作) */
     uint32_t bin_idx;          /**< 属于哪个规格池 (bin) */
     uint32_t pool_idx;         /**< 在 bin 内的索引 */
+    struct nos_reply_ctx_s *reply_ctx; /**< 请求来源上下文，用于异步回复 */
 } nos_buffer_t;
 
 /**

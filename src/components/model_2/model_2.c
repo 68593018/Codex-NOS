@@ -13,7 +13,8 @@ typedef struct {
     int local_counter;
 } comp_ctx_t;
 
-static void comp_on_msg(nos_component_t *self, const nos_service_msg_t *msg) {
+static void comp_on_msg(nos_component_t *self, nos_buffer_t *buf) {
+    (void)buf;
     comp_ctx_t *ctx = (comp_ctx_t *)self->priv;
     if (!ctx) return;
     

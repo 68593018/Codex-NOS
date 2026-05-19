@@ -2,6 +2,7 @@
 #define __NOS_COMPONENT_H__
 
 #include "nos_types.h"
+#include "nos_buffer.h"
 
 /* 前向声明消息结构 */
 struct nos_service_msg_s;
@@ -48,7 +49,7 @@ typedef struct nos_component_s {
      * @brief 异步消息处理回调 (远程服务)
      * 当收到发往该组件的消息或该组件关注的服务响应时调用。
      */
-    void (*on_msg)(struct nos_component_s *self, const struct nos_service_msg_s *msg);
+    void (*on_msg)(struct nos_component_s *self, nos_buffer_t *buf);
 
     /**
      * @brief 事件处理回调 (定时器、Socket 等)

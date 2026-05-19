@@ -39,7 +39,8 @@ static void heartbeat_callback(void *arg) {
     }
 }
 
-static void comp_on_msg(nos_component_t *self, const nos_service_msg_t *msg) {
+static void comp_on_msg(nos_component_t *self, nos_buffer_t *buf) {
+    const nos_service_msg_t *msg = (const nos_service_msg_t *)buf->data;
     nos_log_info(self, "Received msg from Comp %u, Code %u", msg->src_component, msg->msg_code);
 
     if (msg->msg_code == 1001) {

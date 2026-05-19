@@ -34,7 +34,8 @@ static void send_ping(nos_component_t *self) {
     }
 }
 
-static void comp_on_msg(nos_component_t *self, const nos_service_msg_t *msg) {
+static void comp_on_msg(nos_component_t *self, nos_buffer_t *buf) {
+    const nos_service_msg_t *msg = (const nos_service_msg_t *)buf->data;
     ping_ctx_t *ctx = (ping_ctx_t *)self->priv;
 
     if (msg->msg_code == 3001) { // START_TEST from CLI

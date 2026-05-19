@@ -52,6 +52,8 @@ typedef struct {
     uint64_t rx_bytes;
     uint64_t rx_errors;
     uint64_t dropped_full;
+    uint32_t generation;
+    int is_passive;
     nos_thread_t *owner_thread; // 绑定的 IO 线程
 } nos_ipc_conn_t;
 
@@ -100,6 +102,7 @@ static void nos_ipc_mark_disconnected(nos_ipc_conn_t *conn) {
     conn->fd = -1;
     conn->is_connected = 0;
     conn->state = NOS_IPC_DISCONNECTED;
+    conn->generation++;
 }
 
 static void nos_ipc_mark_connect_failed(nos_ipc_conn_t *conn, const char *reason) {
@@ -195,6 +198,7 @@ static int nos_ipc_try_connect_locked(nos_ipc_conn_t *conn) {
     conn->fd = fd;
     conn->is_connected = 1;
     conn->state = NOS_IPC_CONNECTED;
+    conn->generation++;
     conn->retry_delay_ms = IPC_RETRY_INITIAL_MS;
     conn->next_retry_ms = 0;
     conn->connect_fail_count = 0;
@@ -241,6 +245,33 @@ static void nos_ipc_process_tx(nos_ipc_conn_t *conn) {
         }
     }
     pthread_mutex_unlock(&conn->lock);
+}
+
+nos_status_t nos_ipc_send_reply(void *reply_conn, uint32_t generation, nos_buffer_t *buf) {
+    nos_ipc_conn_t *conn = (nos_ipc_conn_t *)reply_conn;
+    if (!conn || !buf) return NOS_ERR;
+
+    pthread_mutex_lock(&conn->lock);
+    if (conn->state != NOS_IPC_CONNECTED || conn->fd < 0 || conn->generation != generation) {
+        pthread_mutex_unlock(&conn->lock);
+        return NOS_ERR;
+    }
+
+    uint32_t next_tail = (conn->tail + 1) % TX_QUEUE_SIZE;
+    if (next_tail == conn->head) {
+        conn->dropped_full++;
+        pthread_mutex_unlock(&conn->lock);
+        atomic_fetch_add(&g_node_ctx.stats.dropped_full, 1);
+        return NOS_ERR_BUSY;
+    }
+
+    nos_buffer_retain(buf);
+    conn->tx_queue[conn->tail] = buf;
+    conn->tail = next_tail;
+    pthread_mutex_unlock(&conn->lock);
+
+    nos_ipc_process_tx(conn);
+    return NOS_OK;
 }
 
 /**
@@ -294,6 +325,10 @@ static void nos_ipc_recv_handler(int fd, nos_ipc_conn_t *conn, nos_thread_t *thr
 
     ssize_t ret = recv(fd, buf->data, full_msg_len, MSG_DONTWAIT);
     if (ret == (ssize_t)full_msg_len) {
+        if (conn) {
+            extern nos_reply_ctx_t* nos_reply_ctx_create(void *ipc_conn, uint32_t ipc_generation, uint32_t corr_id, uint32_t requester_component);
+            buf->reply_ctx = nos_reply_ctx_create(conn, conn->generation, header_tmp.seq, header_tmp.src_component);
+        }
         atomic_fetch_add(&g_node_ctx.stats.rx_packets, 1);
         atomic_fetch_add(&g_node_ctx.stats.rx_bytes, ret);
         if (conn) {
@@ -356,9 +391,43 @@ static nos_ipc_conn_t* get_or_create_conn(const char *uds_path) {
     conn->rx_bytes = 0;
     conn->rx_errors = 0;
     conn->dropped_full = 0;
+    conn->generation = 1;
+    conn->is_passive = 0;
     pthread_mutex_init(&conn->lock, NULL);
     conn->owner_thread = g_node_ctx.mgmt_thread; // 统一由管理线程处理 IO
     
+    pthread_mutex_unlock(&g_pool_lock);
+    return conn;
+}
+
+static nos_ipc_conn_t* create_passive_conn(int fd, nos_thread_t *thread) {
+    pthread_mutex_lock(&g_pool_lock);
+    if (g_remote_conn_count >= MAX_REMOTE_CONNS) {
+        pthread_mutex_unlock(&g_pool_lock);
+        return NULL;
+    }
+
+    nos_ipc_conn_t *conn = &g_remote_conns[g_remote_conn_count++];
+    snprintf(conn->uds_path, sizeof(conn->uds_path), "passive:%d", fd);
+    conn->fd = fd;
+    conn->head = conn->tail = 0;
+    conn->is_connected = 1;
+    conn->state = NOS_IPC_CONNECTED;
+    conn->next_retry_ms = 0;
+    conn->retry_delay_ms = IPC_RETRY_INITIAL_MS;
+    conn->connect_fail_count = 0;
+    conn->tx_packets = 0;
+    conn->tx_bytes = 0;
+    conn->tx_errors = 0;
+    conn->rx_packets = 0;
+    conn->rx_bytes = 0;
+    conn->rx_errors = 0;
+    conn->dropped_full = 0;
+    conn->generation = 1;
+    conn->is_passive = 1;
+    pthread_mutex_init(&conn->lock, NULL);
+    conn->owner_thread = thread;
+
     pthread_mutex_unlock(&g_pool_lock);
     return conn;
 }
@@ -400,14 +469,6 @@ nos_status_t nos_ipc_send_enqueue(const char *uds_path, nos_buffer_t *buf) {
 }
 
 /**
- * @brief 处理被动接入的连接
- */
-static void nos_ipc_passive_handler(int fd, void *arg) {
-    nos_thread_t *thread = (nos_thread_t *)arg;
-    nos_ipc_recv_handler(fd, NULL, thread);
-}
-
-/**
  * @brief 监听 Socket 的新连接回调
  */
 static void nos_ipc_accept_handler(int listen_fd, void *arg) {
@@ -418,8 +479,12 @@ static void nos_ipc_accept_handler(int listen_fd, void *arg) {
     nos_sys_log_info("IPC Accepted new connection: FD %d", client_fd);
     fcntl(client_fd, F_SETFL, fcntl(client_fd, F_GETFL, 0) | O_NONBLOCK);
 
-    /* 直接将 thread 作为 arg 传递给被动处理器 */
-    nos_scheduler_add_fd(thread, client_fd, nos_ipc_passive_handler, thread);
+    nos_ipc_conn_t *conn = create_passive_conn(client_fd, thread);
+    if (!conn) {
+        close(client_fd);
+        return;
+    }
+    nos_scheduler_add_fd_ex(thread, client_fd, EPOLLIN | EPOLLOUT | EPOLLET, nos_ipc_event_handler, conn);
 }
 
 /**

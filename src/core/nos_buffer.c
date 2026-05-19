@@ -3,6 +3,7 @@
 #include <string.h>
 #include <pthread.h>
 #include "nos_buffer.h"
+#include "nos_service.h"
 #include "nos_api.h"
 
 #define MAX_BINS 8
@@ -103,6 +104,7 @@ nos_buffer_t* nos_buffer_alloc(uint32_t size, uint32_t headroom) {
             buf->data = buf->raw_data + headroom;
             buf->len = size;
             buf->tailroom = buf->capacity - headroom - size;
+            buf->reply_ctx = NULL;
             
             bin->used_count++;
             if (bin->used_count > bin->peak_count) bin->peak_count = bin->used_count;
@@ -137,6 +139,10 @@ void nos_buffer_release(nos_buffer_t *buf) {
         buf->len = 0;
         buf->headroom = 0;
         buf->tailroom = buf->capacity;
+        if (buf->reply_ctx) {
+            nos_reply_ctx_release(buf->reply_ctx);
+            buf->reply_ctx = NULL;
+        }
         
         pthread_mutex_unlock(&g_buffer_lock);
     }

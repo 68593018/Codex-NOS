@@ -1,5 +1,6 @@
 import shutil
 import signal
+import socket
 import subprocess
 import time
 import unittest
@@ -10,6 +11,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeReloadTest(unittest.TestCase):
+    def socket_is_listening(self, path):
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as sock:
+                sock.settimeout(0.2)
+                sock.connect(path)
+                return True
+        except OSError:
+            return False
+
     def run_node_commands(self, commands, mutate=None, timeout=8):
         proc = subprocess.Popen(
             [str(REPO_ROOT / "nos_ProcA")],
@@ -176,6 +186,43 @@ class RuntimeReloadTest(unittest.TestCase):
         self.assertIn("rx_packets", ipc_stats)
         self.assertNotIn("dropped_messages", ipc_stats)
         self.assertNotIn("total_memory_bytes", ipc_stats)
+
+    def test_remote_perf_completes_over_original_ipc_connection(self):
+        if self.socket_is_listening("/tmp/nos_proc_B.sock"):
+            self.skipTest("external ProcB is already running")
+
+        proc_b = subprocess.Popen(
+            [str(REPO_ROOT / "nos_ProcB")],
+            cwd=REPO_ROOT,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        try:
+            time.sleep(0.8)
+            if not self.socket_is_listening("/tmp/nos_proc_B.sock"):
+                self.skipTest("UDS listener is not available in this environment")
+
+            rc, output = self.run_node_commands(["perf remote 10"], timeout=10)
+
+            self.assertEqual(rc, 0, output)
+            self.assertIn("Cross-Process Perf Test Started: 10 iterations", output)
+            self.assertIn("Cross-Process Perf Test Complete", output)
+        finally:
+            if proc_b.poll() is None:
+                try:
+                    proc_b.stdin.write("quit\n")
+                    proc_b.stdin.flush()
+                    proc_b.communicate(timeout=4)
+                except Exception:
+                    proc_b.send_signal(signal.SIGTERM)
+                    try:
+                        proc_b.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc_b.kill()
+                        proc_b.communicate(timeout=2)
 
 
 if __name__ == "__main__":

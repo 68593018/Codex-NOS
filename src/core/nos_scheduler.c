@@ -40,6 +40,47 @@ static service_entry_t* find_service_entry(uint32_t service_id) {
     return NULL;
 }
 
+static loaded_comp_info_t* find_loaded_component_info(uint32_t comp_id) {
+    extern nos_node_ctx_t g_node_ctx;
+    for (uint32_t i = 0; i < g_node_ctx.loaded_count; i++) {
+        loaded_comp_info_t *info = &g_node_ctx.loaded_info[i];
+        if (info->comp && info->comp->id == comp_id) return info;
+    }
+    return NULL;
+}
+
+struct nos_reply_ctx_s {
+    atomic_uint ref_cnt;
+    void *ipc_conn;
+    uint32_t ipc_generation;
+    uint32_t corr_id;
+    uint32_t requester_component;
+};
+
+nos_reply_ctx_t* nos_reply_ctx_create(void *ipc_conn, uint32_t ipc_generation, uint32_t corr_id, uint32_t requester_component) {
+    nos_reply_ctx_t *ctx = calloc(1, sizeof(nos_reply_ctx_t));
+    if (!ctx) return NULL;
+    atomic_init(&ctx->ref_cnt, 1);
+    ctx->ipc_conn = ipc_conn;
+    ctx->ipc_generation = ipc_generation;
+    ctx->corr_id = corr_id;
+    ctx->requester_component = requester_component;
+    return ctx;
+}
+
+nos_reply_ctx_t* nos_service_get_reply_ctx(nos_buffer_t *buf) {
+    return buf ? buf->reply_ctx : NULL;
+}
+
+void nos_reply_ctx_retain(nos_reply_ctx_t *ctx) {
+    if (ctx) atomic_fetch_add(&ctx->ref_cnt, 1);
+}
+
+void nos_reply_ctx_release(nos_reply_ctx_t *ctx) {
+    if (!ctx) return;
+    if (atomic_fetch_sub(&ctx->ref_cnt, 1) == 1) free(ctx);
+}
+
 /* --- 定时器对象实现 --- */
 
 struct nos_timer_s {
@@ -433,11 +474,31 @@ static nos_status_t nos_transport_remote_uds_send(nos_buffer_t *buf, const char 
 nos_status_t nos_service_msg_send(nos_buffer_t *buf) {
     if (!buf) return NOS_ERR;
     nos_service_msg_t *header = (nos_service_msg_t *)buf->data;
+    if ((header->flags & NOS_MSG_F_REPLY) && header->dst_component != 0) {
+        loaded_comp_info_t *info = find_loaded_component_info(header->dst_component);
+        if (info) {
+            return nos_transport_local_send(buf, info->owner_thread);
+        }
+        nos_sys_log_error("Reply target component not found: %u", header->dst_component);
+        return NOS_ERR;
+    }
+
     service_entry_t *entry = find_service_entry(header->dst_service);
     if (entry) {
         return entry->is_remote ? nos_transport_remote_uds_send(buf, entry->remote_uds_path) : nos_transport_local_send(buf, entry->local_thread);
     }
     return NOS_ERR;
+}
+
+nos_status_t nos_service_reply(nos_reply_ctx_t *ctx, nos_buffer_t *buf) {
+    if (!ctx || !buf) return NOS_ERR;
+    nos_service_msg_t *header = (nos_service_msg_t *)buf->data;
+    header->flags |= NOS_MSG_F_REPLY;
+    header->seq = ctx->corr_id;
+    header->dst_component = ctx->requester_component;
+
+    extern nos_status_t nos_ipc_send_reply(void *reply_conn, uint32_t generation, nos_buffer_t *buf);
+    return nos_ipc_send_reply(ctx->ipc_conn, ctx->ipc_generation, buf);
 }
 
 static void process_thread_messages(nos_thread_t *self) {
@@ -453,11 +514,20 @@ static void process_thread_messages(nos_thread_t *self) {
         if (!buf) break;
 
         nos_service_msg_t *header = (nos_service_msg_t *)buf->data;
-        service_entry_t *entry = find_service_entry(header->dst_service);
-        if (entry && entry->local_provider &&
-            entry->local_provider->status == NOS_COMP_ST_ACTIVE &&
-            entry->local_provider->on_msg) {
-            entry->local_provider->on_msg(entry->local_provider, header);
+        if ((header->flags & NOS_MSG_F_REPLY) && header->dst_component != 0) {
+            loaded_comp_info_t *info = find_loaded_component_info(header->dst_component);
+            if (info && info->comp &&
+                info->comp->status == NOS_COMP_ST_ACTIVE &&
+                info->comp->on_msg) {
+                info->comp->on_msg(info->comp, buf);
+            }
+        } else {
+            service_entry_t *entry = find_service_entry(header->dst_service);
+            if (entry && entry->local_provider &&
+                entry->local_provider->status == NOS_COMP_ST_ACTIVE &&
+                entry->local_provider->on_msg) {
+                entry->local_provider->on_msg(entry->local_provider, buf);
+            }
         }
         nos_buffer_release(buf);
     }
