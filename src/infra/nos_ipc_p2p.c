@@ -15,6 +15,7 @@
 #include "nos_buffer.h"
 #include "nos_api.h"
 #include "nos_node_priv.h"
+#include "nos_stats.h"
 
 #define TX_QUEUE_SIZE 1024
 #define MAX_REMOTE_CONNS 16
@@ -59,6 +60,15 @@ static uint32_t g_remote_conn_count = 0;
 static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void nos_ipc_event_handler(int fd, void *arg);
+
+void nos_ipc_register_stats(void) {
+    nos_stats_register_counter("ipc", "tx_packets", (const volatile uint64_t *)&g_node_ctx.stats.tx_packets);
+    nos_stats_register_counter("ipc", "rx_packets", (const volatile uint64_t *)&g_node_ctx.stats.rx_packets);
+    nos_stats_register_counter("ipc", "tx_errors", (const volatile uint64_t *)&g_node_ctx.stats.tx_errors);
+    nos_stats_register_counter("ipc", "rx_errors", (const volatile uint64_t *)&g_node_ctx.stats.rx_errors);
+    nos_stats_register_counter("ipc", "dropped_full", (const volatile uint64_t *)&g_node_ctx.stats.dropped_full);
+    nos_stats_register_counter("ipc", "buffer_alloc_fails", (const volatile uint64_t *)&g_node_ctx.stats.buffer_alloc_fails);
+}
 
 static uint64_t ipc_monotonic_ms(void) {
     struct timespec ts;

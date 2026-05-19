@@ -156,6 +156,9 @@ void nos_log_get_stats(unsigned long *total_dropped) {
     if (total_dropped) *total_dropped = atomic_load(&g_log_ctx.dropped_count);
 }
 
+uint64_t nos_log_get_dropped_count(void) {
+    return atomic_load(&g_log_ctx.dropped_count);
+}
 
 void nos_log_set_comp_info(uint32_t comp_id, const char *name) {
     if (comp_id == 0 || comp_id >= MAX_COMP_ID || !name) return;

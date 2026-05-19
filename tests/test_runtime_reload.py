@@ -154,6 +154,24 @@ class RuntimeReloadTest(unittest.TestCase):
         self.assertRegex(output, r"/tmp/nos_proc_B\.sock\s+BACKOFF\s+-1\s+1")
         self.assertRegex(output, r"/tmp/nos_proc_B\.sock\s+0\s+0\s+0\s+0\s+0\s+0\s+0")
 
+    def test_show_stats_reports_registered_metrics(self):
+        rc, output = self.run_node_commands([
+            "show stats",
+            "show stats ipc",
+        ])
+
+        self.assertEqual(rc, 0, output)
+        self.assertIn("NOS Stats", output)
+        self.assertIn("ipc", output)
+        self.assertIn("tx_packets", output)
+        self.assertIn("rx_packets", output)
+        self.assertIn("log", output)
+        self.assertIn("dropped_messages", output)
+        self.assertIn("buffer", output)
+        self.assertIn("total_memory_bytes", output)
+        self.assertIn("scheduler", output)
+        self.assertIn("NOS Stats: ipc", output)
+
 
 if __name__ == "__main__":
     unittest.main()

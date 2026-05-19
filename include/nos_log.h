@@ -56,4 +56,14 @@ void nos_log_deinit(void);
  */
 size_t nos_log_get_mem_usage(void);
 
+/**
+ * @brief 获取日志丢弃计数
+ */
+void nos_log_get_stats(unsigned long *total_dropped);
+
+/**
+ * @brief 获取日志丢弃计数，供 stats registry 使用
+ */
+uint64_t nos_log_get_dropped_count(void);
+
 #endif /* __NOS_LOG_H__ */

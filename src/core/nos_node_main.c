@@ -11,6 +11,7 @@
 #include "nos_buffer.h"
 #include "nos_log.h"
 #include "nos_api.h"
+#include "nos_stats.h"
 
 /* 定义并初始化全局上下文 */
 nos_node_ctx_t g_node_ctx = {
@@ -29,11 +30,37 @@ static void* scheduler_thread_entry(void *arg) {
     return NULL;
 }
 
+static uint64_t stats_read_log_dropped(void *arg) {
+    (void)arg;
+    return nos_log_get_dropped_count();
+}
+
+static uint64_t stats_read_buffer_mem(void *arg) {
+    (void)arg;
+    return (uint64_t)nos_buffer_get_total_mem_usage();
+}
+
+static uint64_t stats_read_scheduler_mem(void *arg) {
+    (void)arg;
+    return (uint64_t)nos_scheduler_get_total_mem_usage();
+}
+
+static void node_register_stats(void) {
+    extern void nos_ipc_register_stats(void);
+
+    nos_stats_init();
+    nos_ipc_register_stats();
+    nos_stats_register_gauge("log", "dropped_messages", stats_read_log_dropped, NULL);
+    nos_stats_register_gauge("buffer", "total_memory_bytes", stats_read_buffer_mem, NULL);
+    nos_stats_register_gauge("scheduler", "total_memory_bytes", stats_read_scheduler_mem, NULL);
+}
+
 int main(int argc, char *argv[]) {
     const nos_node_def_t *node_def = nos_manifest_get_local();
     if (!node_def) { nos_sys_log_error("Local node manifest not found."); return -1; }
 
     g_node_ctx.node_def = node_def;
+    node_register_stats();
 
     /* 按需初始化平台基础设施 (由清单驱动) */
     if (node_def->platform_inits) {
