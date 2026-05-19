@@ -127,6 +127,42 @@ class GenManifestTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("references unknown component", result.stderr)
 
+    def test_rejects_duplicate_service_id(self):
+        files = dict(BASE_CONFIG)
+        files["components.yaml"] = files["components.yaml"].replace("id: 101", "id: 100")
+
+        result, _ = self.run_generator(files)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("duplicate service id", result.stderr)
+
+    def test_rejects_unknown_model(self):
+        files = dict(BASE_CONFIG)
+        files["components.yaml"] = files["components.yaml"].replace("model: \"ModelB\"", "model: \"MissingModel\"")
+
+        result, _ = self.run_generator(files)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("references unknown model", result.stderr)
+
+    def test_rejects_unknown_buffer_profile(self):
+        files = dict(BASE_CONFIG)
+        files["nodes.yaml"] = files["nodes.yaml"].replace("buffer_profile: \"default\"", "buffer_profile: \"missing\"")
+
+        result, _ = self.run_generator(files)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("references unknown buffer_profile", result.stderr)
+
+    def test_rejects_invalid_buffer_bin(self):
+        files = dict(BASE_CONFIG)
+        files["profiles.yaml"] = files["profiles.yaml"].replace("count: 8", "count: 0")
+
+        result, _ = self.run_generator(files)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("has invalid count", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

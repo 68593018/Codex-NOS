@@ -77,6 +77,36 @@ class RuntimeReloadTest(unittest.TestCase):
         self.assertIn("reload staged load failed; old component remains active", output)
         self.assertRegex(output, r"Comp-1\s+1\s+Active")
 
+    def test_cli_reports_services_memory_and_log_stats(self):
+        rc, output = self.run_node_commands([
+            "show services",
+            "show memory",
+            "log stats",
+        ])
+
+        self.assertEqual(rc, 0, output)
+        self.assertIn("SVC_LOG", output)
+        self.assertIn("SVC_PING", output)
+        self.assertIn("SVC_REMOTE_PONG", output)
+        self.assertIn("NOS Process Memory Consumption", output)
+        self.assertIn("Buffer Pool", output)
+        self.assertIn("Scheduler/Threads", output)
+        self.assertIn("NOS Logging Statistics", output)
+        self.assertIn("Dropped Messages:", output)
+
+    def test_unload_removes_component_from_runtime_list(self):
+        rc, output = self.run_node_commands([
+            "show components",
+            "unload Comp-Pong",
+            "show components",
+        ])
+
+        self.assertEqual(rc, 0, output)
+        self.assertRegex(output, r"Comp-Pong\s+11\s+Active")
+        self.assertIn("Component Comp-Pong unloaded.", output)
+        after_unload = output.split("Component Comp-Pong unloaded.", 1)[1]
+        self.assertNotRegex(after_unload, r"Comp-Pong\s+11\s+Active")
+
 
 if __name__ == "__main__":
     unittest.main()
