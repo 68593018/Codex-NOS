@@ -124,6 +124,18 @@ class RuntimeReloadTest(unittest.TestCase):
         self.assertIn("NOS Process Memory Consumption", after_unload)
         self.assertIn("NOS Logging Statistics", after_unload)
 
+    def test_remote_ipc_connect_failure_uses_backoff(self):
+        rc, output = self.run_node_commands([
+            "perf remote 1",
+            "perf remote 1",
+            "perf remote 1",
+            "perf remote 1",
+        ])
+
+        self.assertEqual(rc, 0, output)
+        self.assertIn("[CLI] Triggering cross-process performance test", output)
+        self.assertLessEqual(output.count("IPC connect to /tmp/nos_proc_B.sock failed"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

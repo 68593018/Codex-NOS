@@ -8,6 +8,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdint.h>
+#include <time.h>
 #include "nos_scheduler.h"
 #include "nos_service.h"
 #include "nos_buffer.h"
@@ -16,6 +18,16 @@
 
 #define TX_QUEUE_SIZE 1024
 #define MAX_REMOTE_CONNS 16
+#define NOS_IPC_MAX_PAYLOAD_LEN 4096
+#define IPC_RETRY_INITIAL_MS 100
+#define IPC_RETRY_MAX_MS 5000
+
+typedef enum {
+    NOS_IPC_DISCONNECTED = 0,
+    NOS_IPC_CONNECTING,
+    NOS_IPC_CONNECTED,
+    NOS_IPC_BACKOFF
+} nos_ipc_conn_state_t;
 
 /**
  * @brief IPC 连接上下文 (支持异步发送)
@@ -28,6 +40,10 @@ typedef struct {
     uint32_t tail;
     pthread_mutex_t lock;
     int is_connected;
+    nos_ipc_conn_state_t state;
+    uint64_t next_retry_ms;
+    uint32_t retry_delay_ms;
+    uint32_t connect_fail_count;
     nos_thread_t *owner_thread; // 绑定的 IO 线程
 } nos_ipc_conn_t;
 
@@ -35,11 +51,80 @@ static nos_ipc_conn_t g_remote_conns[MAX_REMOTE_CONNS];
 static uint32_t g_remote_conn_count = 0;
 static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static void nos_ipc_event_handler(int fd, void *arg);
+
+static uint64_t ipc_monotonic_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+static void nos_ipc_mark_disconnected(nos_ipc_conn_t *conn) {
+    if (!conn) return;
+    if (conn->fd >= 0) {
+        nos_scheduler_remove_fd(conn->owner_thread, conn->fd);
+        close(conn->fd);
+    }
+    conn->fd = -1;
+    conn->is_connected = 0;
+    conn->state = NOS_IPC_DISCONNECTED;
+}
+
+static void nos_ipc_mark_connect_failed(nos_ipc_conn_t *conn, const char *reason) {
+    uint32_t delay = conn->retry_delay_ms ? conn->retry_delay_ms : IPC_RETRY_INITIAL_MS;
+    conn->connect_fail_count++;
+    conn->retry_delay_ms = (delay >= IPC_RETRY_MAX_MS / 2) ? IPC_RETRY_MAX_MS : delay * 2;
+    conn->next_retry_ms = ipc_monotonic_ms() + delay;
+    conn->state = NOS_IPC_BACKOFF;
+    conn->is_connected = 0;
+
+    if (conn->connect_fail_count == 1 || delay >= IPC_RETRY_MAX_MS) {
+        nos_sys_log_error("IPC connect to %s failed: %s; retry in %u ms", conn->uds_path, reason, delay);
+    }
+}
+
+static int nos_ipc_try_connect_locked(nos_ipc_conn_t *conn) {
+    uint64_t now = ipc_monotonic_ms();
+    if (conn->state == NOS_IPC_BACKOFF && now < conn->next_retry_ms) return 0;
+
+    conn->state = NOS_IPC_CONNECTING;
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    if (fd < 0) {
+        nos_ipc_mark_connect_failed(conn, strerror(errno));
+        return 0;
+    }
+
+    struct sockaddr_un addr = {.sun_family = AF_UNIX};
+    strncpy(addr.sun_path, conn->uds_path, sizeof(addr.sun_path) - 1);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        char reason[128];
+        snprintf(reason, sizeof(reason), "%s", strerror(errno));
+        close(fd);
+        nos_ipc_mark_connect_failed(conn, reason);
+        return 0;
+    }
+
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+    conn->fd = fd;
+    conn->is_connected = 1;
+    conn->state = NOS_IPC_CONNECTED;
+    conn->retry_delay_ms = IPC_RETRY_INITIAL_MS;
+    conn->next_retry_ms = 0;
+    conn->connect_fail_count = 0;
+    nos_scheduler_add_fd_ex(conn->owner_thread, fd, EPOLLIN | EPOLLOUT | EPOLLET, nos_ipc_event_handler, conn);
+    nos_sys_log_info("IPC connected to %s (FD:%d)", conn->uds_path, fd);
+    return 1;
+}
+
 /**
  * @brief 尝试从队列中发送数据
  */
 static void nos_ipc_process_tx(nos_ipc_conn_t *conn) {
     pthread_mutex_lock(&conn->lock);
+    if (conn->state != NOS_IPC_CONNECTED || conn->fd < 0) {
+        pthread_mutex_unlock(&conn->lock);
+        return;
+    }
     while (conn->head != conn->tail) {
         nos_buffer_t *buf = conn->tx_queue[conn->head];
         nos_service_msg_t *header = (nos_service_msg_t *)buf->data;
@@ -60,9 +145,7 @@ static void nos_ipc_process_tx(nos_ipc_conn_t *conn) {
             /* 链路故障 */
             nos_sys_log_error("IPC remote send failed to %s: %s", conn->uds_path, strerror(errno));
             atomic_fetch_add(&g_node_ctx.stats.tx_errors, 1);
-            close(conn->fd);
-            conn->fd = -1;
-            conn->is_connected = 0;
+            nos_ipc_mark_disconnected(conn);
             pthread_mutex_unlock(&conn->lock);
             return;
         }
@@ -81,8 +164,7 @@ static void nos_ipc_recv_handler(int fd, nos_ipc_conn_t *conn, nos_thread_t *thr
         /* 连接断开 */
         if (conn) {
             nos_sys_log_info("Remote closed connection: %s", conn->uds_path);
-            nos_scheduler_remove_fd(conn->owner_thread, fd);
-            close(fd); conn->fd = -1; conn->is_connected = 0;
+            nos_ipc_mark_disconnected(conn);
         } else {
             nos_sys_log_info("Passive connection closed (FD:%d)", fd);
             nos_scheduler_remove_fd(thread, fd);
@@ -94,8 +176,7 @@ static void nos_ipc_recv_handler(int fd, nos_ipc_conn_t *conn, nos_thread_t *thr
     if (header_tmp.magic != NOS_IPC_MAGIC) {
         nos_sys_log_error("Protocol error: Invalid magic. Dropping link.");
         if (conn) {
-            nos_scheduler_remove_fd(conn->owner_thread, fd);
-            close(fd); conn->fd = -1; conn->is_connected = 0;
+            nos_ipc_mark_disconnected(conn);
         } else {
             nos_scheduler_remove_fd(thread, fd);
             close(fd);
@@ -104,6 +185,13 @@ static void nos_ipc_recv_handler(int fd, nos_ipc_conn_t *conn, nos_thread_t *thr
     }
 
     size_t full_msg_len = sizeof(nos_service_msg_t) + header_tmp.payload_len;
+    if (header_tmp.payload_len > NOS_IPC_MAX_PAYLOAD_LEN) {
+        nos_sys_log_error("IPC payload too large: %u bytes", header_tmp.payload_len);
+        atomic_fetch_add(&g_node_ctx.stats.rx_errors, 1);
+        recv(fd, NULL, 0, MSG_TRUNC | MSG_DONTWAIT);
+        return;
+    }
+
     nos_buffer_t *buf = nos_buffer_alloc(full_msg_len, 0);
     if (!buf) {
         atomic_fetch_add(&g_node_ctx.stats.buffer_alloc_fails, 1);
@@ -132,6 +220,7 @@ static void nos_ipc_event_handler(int fd, void *arg) {
 
     /* 1. 处理写事件 (优先排干发送队列) */
     nos_ipc_process_tx(conn);
+    if (conn->state != NOS_IPC_CONNECTED || conn->fd < 0) return;
 
     /* 2. 处理读事件 */
     nos_ipc_recv_handler(fd, conn, conn->owner_thread);
@@ -158,6 +247,10 @@ static nos_ipc_conn_t* get_or_create_conn(const char *uds_path) {
     conn->fd = -1;
     conn->head = conn->tail = 0;
     conn->is_connected = 0;
+    conn->state = NOS_IPC_DISCONNECTED;
+    conn->next_retry_ms = 0;
+    conn->retry_delay_ms = IPC_RETRY_INITIAL_MS;
+    conn->connect_fail_count = 0;
     pthread_mutex_init(&conn->lock, NULL);
     conn->owner_thread = g_node_ctx.mgmt_thread; // 统一由管理线程处理 IO
     
@@ -174,27 +267,7 @@ nos_status_t nos_ipc_send_enqueue(const char *uds_path, nos_buffer_t *buf) {
 
     pthread_mutex_lock(&conn->lock);
     
-    /* 1. 自动重连逻辑 */
-    if (conn->fd < 0) {
-        int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
-        if (fd >= 0) {
-            struct sockaddr_un addr = {.sun_family = AF_UNIX};
-            strncpy(addr.sun_path, uds_path, sizeof(addr.sun_path) - 1);
-            if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-                fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
-                conn->fd = fd;
-                conn->is_connected = 1;
-                /* 使用调度器标准接口注册，监听 IN 和 OUT */
-                nos_scheduler_add_fd_ex(conn->owner_thread, fd, EPOLLIN | EPOLLOUT | EPOLLET, nos_ipc_event_handler, conn);
-                nos_sys_log_info("IPC connected to %s (FD:%d)", uds_path, fd);
-            } else {
-                nos_sys_log_error("IPC connect to %s failed: %s", uds_path, strerror(errno));
-                close(fd);
-            }
-        }
-    }
-
-    /* 2. 入队 */
+    /* 1. 入队 */
     uint32_t next_tail = (conn->tail + 1) % TX_QUEUE_SIZE;
     if (next_tail == conn->head) {
         pthread_mutex_unlock(&conn->lock);
@@ -205,10 +278,15 @@ nos_status_t nos_ipc_send_enqueue(const char *uds_path, nos_buffer_t *buf) {
     nos_buffer_retain(buf);
     conn->tx_queue[conn->tail] = buf;
     conn->tail = next_tail;
+
+    /* 2. 自动重连逻辑，退避期内只排队不重复 connect */
+    if (conn->fd < 0 || conn->state != NOS_IPC_CONNECTED) {
+        nos_ipc_try_connect_locked(conn);
+    }
     pthread_mutex_unlock(&conn->lock);
 
     /* 3. 如果已连接，主动触发一次尝试发送 */
-    if (conn->is_connected) {
+    if (conn->state == NOS_IPC_CONNECTED) {
         nos_ipc_process_tx(conn);
     }
     
