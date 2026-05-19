@@ -59,6 +59,21 @@ static uint64_t ipc_monotonic_ms(void) {
     return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
 
+static const char* ipc_state_name(nos_ipc_conn_state_t state) {
+    switch (state) {
+        case NOS_IPC_DISCONNECTED: return "DISCONNECTED";
+        case NOS_IPC_CONNECTING: return "CONNECTING";
+        case NOS_IPC_CONNECTED: return "CONNECTED";
+        case NOS_IPC_BACKOFF: return "BACKOFF";
+        default: return "UNKNOWN";
+    }
+}
+
+static uint32_t ipc_queue_len(const nos_ipc_conn_t *conn) {
+    if (conn->tail >= conn->head) return conn->tail - conn->head;
+    return TX_QUEUE_SIZE - conn->head + conn->tail;
+}
+
 static void nos_ipc_mark_disconnected(nos_ipc_conn_t *conn) {
     if (!conn) return;
     if (conn->fd >= 0) {
@@ -81,6 +96,39 @@ static void nos_ipc_mark_connect_failed(nos_ipc_conn_t *conn, const char *reason
     if (conn->connect_fail_count == 1 || delay >= IPC_RETRY_MAX_MS) {
         nos_sys_log_error("IPC connect to %s failed: %s; retry in %u ms", conn->uds_path, reason, delay);
     }
+}
+
+void nos_ipc_dump_stats(void) {
+    uint64_t now = ipc_monotonic_ms();
+
+    printf("\n--- IPC Connections ---\n");
+    printf("%-28s %-13s %-4s %-6s %-10s %-8s\n", "Path", "State", "FD", "Queue", "Retry(ms)", "Failures");
+    printf("----------------------------------------------------------------------------\n");
+
+    pthread_mutex_lock(&g_pool_lock);
+    if (g_remote_conn_count == 0) {
+        printf("(no remote connections)\n");
+        pthread_mutex_unlock(&g_pool_lock);
+        return;
+    }
+
+    for (uint32_t i = 0; i < g_remote_conn_count; i++) {
+        nos_ipc_conn_t *conn = &g_remote_conns[i];
+        pthread_mutex_lock(&conn->lock);
+        uint64_t retry_left = 0;
+        if (conn->state == NOS_IPC_BACKOFF && conn->next_retry_ms > now) {
+            retry_left = conn->next_retry_ms - now;
+        }
+        printf("%-28s %-13s %-4d %-6u %-10llu %-8u\n",
+               conn->uds_path,
+               ipc_state_name(conn->state),
+               conn->fd,
+               ipc_queue_len(conn),
+               (unsigned long long)retry_left,
+               conn->connect_fail_count);
+        pthread_mutex_unlock(&conn->lock);
+    }
+    pthread_mutex_unlock(&g_pool_lock);
 }
 
 static int nos_ipc_try_connect_locked(nos_ipc_conn_t *conn) {

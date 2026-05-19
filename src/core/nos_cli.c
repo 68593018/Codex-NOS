@@ -31,6 +31,7 @@ static void do_show_components(const char *args);
 static void do_show_services(const char *args);
 static void do_show_db(const char *args);
 static void do_show_memory(const char *args);
+static void do_show_ipc(const char *args);
 static void do_log(const char *args);
 static void do_perf_start(const char *args);
 static void do_perf_remote_start(const char *args);
@@ -50,6 +51,7 @@ static nos_cli_cmd_t g_cli_cmds[] = {
     {"show services",   "List all service routes",         do_show_services},
     {"show db",         "List all KV tables status",        do_show_db},
     {"show memory",     "Show process memory consumption",  do_show_memory},
+    {"show ipc",        "Show IPC connection status",       do_show_ipc},
     {"log",             "Manage logging (stats, level)",    do_log},
     {"perf start",      "Start IPC performance test",       do_perf_start},
     {"perf remote",     "Start Cross-Process IPC test",     do_perf_remote_start},
@@ -100,6 +102,11 @@ static void do_show_services(const char *args) {
 }
 
 static void do_show_db(const char *args) { extern void nos_kv_dump_all(void); nos_kv_dump_all(); }
+
+static void do_show_ipc(const char *args) {
+    extern void nos_ipc_dump_stats(void);
+    nos_ipc_dump_stats();
+}
 
 static void do_show_memory(const char *args) {
     extern size_t nos_log_get_mem_usage(void);
@@ -258,7 +265,7 @@ static void handle_tab_completion(char *buf, int *pos, const char *prompt) {
             const char *perf_args[] = {"start", "remote", NULL};
             for (int i = 0; perf_args[i]; i++) if (strncmp(perf_args[i], match_start, match_len) == 0) suggestions[sug_count++] = perf_args[i];
         } else if (strncmp(buf, "show ", 5) == 0) {
-            const char *show_args[] = {"components", "services", "db", "memory", NULL};
+            const char *show_args[] = {"components", "services", "db", "memory", "ipc", NULL};
             for (int i = 0; show_args[i]; i++) if (strncmp(show_args[i], match_start, match_len) == 0) suggestions[sug_count++] = show_args[i];
         } else if (strncmp(buf, "load ", 5) == 0 || strncmp(buf, "unload ", 7) == 0 || strncmp(buf, "reload ", 7) == 0) {
             for (uint32_t i = 0; i < g_node_ctx.loaded_count; i++) {

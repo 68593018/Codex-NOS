@@ -136,6 +136,18 @@ class RuntimeReloadTest(unittest.TestCase):
         self.assertIn("[CLI] Triggering cross-process performance test", output)
         self.assertLessEqual(output.count("IPC connect to /tmp/nos_proc_B.sock failed"), 1)
 
+    def test_show_ipc_reports_remote_connection_state(self):
+        rc, output = self.run_node_commands([
+            "perf remote 1",
+            "show ipc",
+        ])
+
+        self.assertEqual(rc, 0, output)
+        self.assertIn("IPC Connections", output)
+        self.assertIn("/tmp/nos_proc_B.sock", output)
+        self.assertIn("BACKOFF", output)
+        self.assertRegex(output, r"/tmp/nos_proc_B\.sock\s+BACKOFF\s+-1\s+1")
+
 
 if __name__ == "__main__":
     unittest.main()
