@@ -20,9 +20,6 @@
 #define MAX_EVENTS 10
 #define MAX_COMP_PER_THREAD 32
 
-/* 线程局部变量：存储当前线程的调度器指针 */
-static __thread nos_thread_t *t_local_scheduler = NULL;
-
 /* 服务注册表项 */
 typedef struct {
     uint32_t service_id;
@@ -359,7 +356,6 @@ void nos_scheduler_stop(nos_thread_t *thread) {
 
 nos_status_t nos_scheduler_run_loop(nos_thread_t *self) {
     if (!self) return NOS_ERR;
-    t_local_scheduler = self;
     for (uint32_t i = 0; i < self->component_count; i++) {
         nos_component_t *comp = self->components[i];
         if (comp && comp->start && comp->status != NOS_COMP_ST_ACTIVE) {

@@ -66,4 +66,7 @@ libcomp-rpong.so: src/components/perf/remote_pong.c include/nos_ids.h
 	@$(CC) $(CFLAGS) -shared $< -o $@
 
 clean:
-	rm -f nos_Proc* libcomp-*.so include/nos_ids.h src/core/*.o src/infra/*.o
+	rm -f nos_Proc* libcomp-*.so include/nos_ids.h src/core/manifest_*.c src/core/*.o src/infra/*.o src/infra/*/*.o
+
+test:
+	@$(PYTHON) -m unittest discover -s tests

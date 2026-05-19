@@ -85,7 +85,129 @@ def parse_yaml_fallback(file_path):
 
 INFRA_INIT_MAP = {"SVC_LOG": "nos_log_init", "SVC_KV_DB": "nos_kv_db_init", "SVC_TIMER": "nos_timer_init"}
 
+class ConfigError(Exception):
+    pass
+
+def _item_name(item, field, owner):
+    value = item.get(field)
+    if value is None or value == "":
+        raise ConfigError(f"{owner} missing required field '{field}'")
+    return value
+
+def _ensure_unique(items, field, owner):
+    seen = {}
+    for item in items:
+        value = _item_name(item, field, owner)
+        if value in seen:
+            raise ConfigError(f"duplicate {owner} {field}: {value}")
+        seen[value] = item
+    return seen
+
+def _validate_service_defs(services, owner, svc_name_to_owner, svc_id_to_owner):
+    for svc in services:
+        name = _item_name(svc, "name", owner)
+        sid = svc.get("id")
+        if not isinstance(sid, int) or sid <= 0:
+            raise ConfigError(f"{owner} service '{name}' has invalid id: {sid}")
+        stype = svc.get("type")
+        if stype not in ("embedded", "remote"):
+            raise ConfigError(f"{owner} service '{name}' has invalid type: {stype}")
+        if name in svc_name_to_owner:
+            raise ConfigError(f"duplicate service name '{name}' in {owner}; already provided by {svc_name_to_owner[name]}")
+        if sid in svc_id_to_owner:
+            raise ConfigError(f"duplicate service id '{sid}' in {owner}; already used by {svc_id_to_owner[sid]}")
+        svc_name_to_owner[name] = owner
+        svc_id_to_owner[sid] = owner
+
+def validate_config(data):
+    nodes = data.get("nodes", [])
+    components = data.get("components", [])
+    profiles = data.get("profiles", [])
+    models = data.get("models", [])
+    platform = data.get("platform", {})
+
+    if not nodes:
+        raise ConfigError("no nodes configured")
+    if not components:
+        raise ConfigError("no components configured")
+    if not models:
+        raise ConfigError("no component models configured")
+
+    comp_map = _ensure_unique(components, "name", "component")
+    model_map = _ensure_unique(models, "name", "model")
+    profile_map = _ensure_unique(profiles, "name", "profile")
+
+    comp_ids = {}
+    svc_name_to_owner = {}
+    svc_id_to_owner = {}
+
+    _validate_service_defs(platform.get("provides", []), "platform", svc_name_to_owner, svc_id_to_owner)
+
+    for model in models:
+        lib = _item_name(model, "lib", f"model '{model['name']}'")
+        if not lib.endswith(".so"):
+            raise ConfigError(f"model '{model['name']}' lib should be a shared object: {lib}")
+
+    for profile in profiles:
+        bins = profile.get("bins", [])
+        if not bins:
+            raise ConfigError(f"profile '{profile['name']}' has no bins")
+        for idx, bin_def in enumerate(bins):
+            size = bin_def.get("size")
+            count = bin_def.get("count")
+            if not isinstance(size, int) or size <= 0:
+                raise ConfigError(f"profile '{profile['name']}' bin {idx} has invalid size: {size}")
+            if not isinstance(count, int) or count <= 0:
+                raise ConfigError(f"profile '{profile['name']}' bin {idx} has invalid count: {count}")
+
+    for comp in components:
+        cname = comp["name"]
+        cid = comp.get("id")
+        if not isinstance(cid, int) or cid <= 0:
+            raise ConfigError(f"component '{cname}' has invalid id: {cid}")
+        if cid in comp_ids:
+            raise ConfigError(f"duplicate component id '{cid}' in component '{cname}'; already used by '{comp_ids[cid]}'")
+        comp_ids[cid] = cname
+        model = _item_name(comp, "model", f"component '{cname}'")
+        if model not in model_map:
+            raise ConfigError(f"component '{cname}' references unknown model '{model}'")
+        _validate_service_defs(comp.get("provides", []), f"component '{cname}'", svc_name_to_owner, svc_id_to_owner)
+
+    for comp in components:
+        for required in comp.get("requires", []):
+            if required not in svc_name_to_owner:
+                raise ConfigError(f"component '{comp['name']}' requires unknown service '{required}'")
+
+    node_map = _ensure_unique(nodes, "name", "node")
+    for node in nodes:
+        nname = node["name"]
+        _item_name(node, "uds_path", f"node '{nname}'")
+        profile = node.get("buffer_profile", "default")
+        if profile not in profile_map:
+            raise ConfigError(f"node '{nname}' references unknown buffer_profile '{profile}'")
+        threads = node.get("threads", [])
+        if not threads:
+            raise ConfigError(f"node '{nname}' has no threads")
+        thread_names = set()
+        for thread in threads:
+            tname = _item_name(thread, "name", f"node '{nname}' thread")
+            if tname in thread_names:
+                raise ConfigError(f"node '{nname}' has duplicate thread '{tname}'")
+            thread_names.add(tname)
+            comps = thread.get("components", [])
+            if not comps:
+                raise ConfigError(f"node '{nname}' thread '{tname}' has no components")
+            for comp_name in comps:
+                if comp_name not in comp_map:
+                    raise ConfigError(f"node '{nname}' thread '{tname}' references unknown component '{comp_name}'")
+        busy_poll = node.get("busy_poll_cycles", 500)
+        if not isinstance(busy_poll, int) or busy_poll < 0:
+            raise ConfigError(f"node '{nname}' has invalid busy_poll_cycles: {busy_poll}")
+
+    return comp_map, model_map, profile_map, node_map, svc_name_to_owner
+
 def validate_and_resolve(data):
+    validate_config(data)
     comp_map = {c["name"]: c for c in data["components"]}
     model_to_lib = {m["name"]: m["lib"] for m in data["models"]}
     global_svc_map, svc_name_to_id, comp_to_node = {}, {}, {}
@@ -129,9 +251,14 @@ def validate_and_resolve(data):
             for s in comp.get("provides", []): needed_svc_names.add(s["name"])
             for s in comp.get("requires", []): needed_svc_names.add(s)
         
-        node["resolved_services"] = [global_svc_map[s] for s in needed_svc_names if s in global_svc_map]
-        inits = [INFRA_INIT_MAP[sname] for sname in needed_svc_names if sname in INFRA_INIT_MAP]
-        node["platform_inits"] = list(set(inits))
+        node["resolved_services"] = sorted(
+            [global_svc_map[s] for s in needed_svc_names if s in global_svc_map],
+            key=lambda svc: svc["id"]
+        )
+        node["platform_inits"] = [
+            init_func for svc_name, init_func in INFRA_INIT_MAP.items()
+            if svc_name in needed_svc_names
+        ]
 
     return {c["name"]: c["id"] for c in data["components"]}, svc_name_to_id
 
@@ -186,9 +313,13 @@ if __name__ == "__main__":
                     if fd:
                         master["platform"]["provides"].extend(fd["platform"]["provides"])
                         for k in ["nodes", "components", "profiles", "models"]: master[k].extend(fd[k])
-    comp_ids, svc_ids = validate_and_resolve(master)
-    generate_header(comp_ids, svc_ids, out_h)
-    for node in master["nodes"]:
-        out_c = os.path.join(os.path.dirname(out_h), f"manifest_{node['name']}.c").replace("include", "src/core")
-        generate_node_manifest(node, out_c)
-        print(node["name"], end=" ")
+    try:
+        comp_ids, svc_ids = validate_and_resolve(master)
+        generate_header(comp_ids, svc_ids, out_h)
+        for node in master["nodes"]:
+            out_c = os.path.join(os.path.dirname(out_h), f"manifest_{node['name']}.c").replace("include", "src/core")
+            generate_node_manifest(node, out_c)
+            print(node["name"], end=" ")
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        sys.exit(2)
