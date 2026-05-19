@@ -1,0 +1,18 @@
+profiles:
+  - name: "default"
+    bins:
+      - { size: 32,   count: 512 }
+      - { size: 128,  count: 256 }
+      - { size: 512,  count: 128 }
+      - { size: 2048, count: 64 }
+
+  - name: "high_performance_data"
+    bins:
+      - { size: 2048, count: 512 }
+      - { size: 4096, count: 256 }
+
+  - name: "lite_mgmt"
+    bins:
+      - { size: 32,   count: 256 }
+      - { size: 64,   count: 128 }
+      - { size: 128,  count: 64 }

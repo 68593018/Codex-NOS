@@ -1,0 +1,88 @@
+platform:
+  provides:
+    - { name: "SVC_LOG", id: 1, type: "embedded" }
+    - { name: "SVC_KV_DB", id: 2, type: "embedded" }
+    - { name: "SVC_TIMER", id: 3, type: "embedded" }
+
+components:
+  - name: "Comp-1"
+    model: "Model1"
+    id: 1
+    provides:
+      - { name: "SVC_MGMT", id: 101, type: "remote" }
+    requires:
+      - "SVC_LOG"
+      - "SVC_ROUTING_V4"
+      - "SVC_ROUTING_V6"
+      - "SVC_TIMER"
+
+  - name: "Comp-2"
+    model: "Model2"
+    id: 2
+    provides:
+      - { name: "SVC_ROUTING_V4", id: 102, type: "remote" }
+    requires:
+      - "SVC_LOG"
+      - "SVC_DATA_PROC"
+      - "SVC_KV_DB"
+
+  - name: "Comp-3"
+    model: "Model3"
+    id: 3
+    provides:
+      - { name: "SVC_PERF_RX", id: 110, type: "remote" }
+    requires:
+      - "SVC_LOG"
+      - "SVC_ROUTING_V6"
+
+  - name: "Comp-4"
+    model: "Model4"
+    id: 4
+    provides:
+      - { name: "SVC_DATA_PROC", id: 204, type: "remote" }
+    requires:
+      - "SVC_LOG"
+
+  - name: "Comp-5"
+    model: "Model2"
+    id: 5
+    provides:
+      - { name: "SVC_ROUTING_V6", id: 105, type: "remote" }
+    requires:
+      - "SVC_LOG"
+      - "SVC_DATA_PROC"
+      - "SVC_KV_DB"
+
+  - name: "Comp-Ping"
+    model: "ModelPing"
+    id: 10
+    provides:
+      - { name: "SVC_PING", id: 111, type: "remote" }
+    requires:
+      - "SVC_LOG"
+      - "SVC_PONG"
+
+  - name: "Comp-Pong"
+    model: "ModelPong"
+    id: 11
+    provides:
+      - { name: "SVC_PONG", id: 112, type: "remote" }
+    requires:
+      - "SVC_LOG"
+
+  - name: "Comp-RemotePing"
+    model: "ModelRPing"
+    id: 12
+    provides:
+      - { name: "SVC_REMOTE_PING", id: 113, type: "remote" }
+    requires:
+      - "SVC_LOG"
+      - "SVC_REMOTE_PONG"
+
+  - name: "Comp-RemotePong"
+    model: "ModelRPong"
+    id: 13
+    provides:
+      - { name: "SVC_REMOTE_PONG", id: 114, type: "remote" }
+    requires:
+      - "SVC_LOG"

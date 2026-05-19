@@ -1,0 +1,10 @@
+nodes:
+  - name: "ProcA"
+    uds_path: "/tmp/nos_proc_A.sock"
+    buffer_profile: "lite_mgmt"
+    busy_poll_cycles: 5000
+    threads:
+      - name: "Worker-1"
+        components: ["Comp-1", "Comp-3", "Comp-Ping", "Comp-RemotePing"]
+      - name: "Worker-2"
+        components: ["Comp-2", "Comp-5", "Comp-Pong"]
