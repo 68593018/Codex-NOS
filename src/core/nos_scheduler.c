@@ -138,6 +138,7 @@ nos_status_t nos_scheduler_init_thread(nos_thread_t *thread, uint32_t id, const 
     thread->stop_requested = 0;
     atomic_init(&thread->is_sleeping, 0);
     pthread_mutex_init(&thread->queue_lock, NULL);
+    pthread_mutex_init(&thread->component_lock, NULL);
     thread->epoll_fd = epoll_create1(0);
 
     thread->notify_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -175,6 +176,7 @@ void nos_scheduler_deinit_thread(nos_thread_t *thread) {
     }
     pthread_mutex_unlock(&thread->queue_lock);
     pthread_mutex_destroy(&thread->queue_lock);
+    pthread_mutex_destroy(&thread->component_lock);
 
 
     /* 3. 释放定时器堆中的定时器 (由框架创建的容器，内部 timer 需由组件释放或在此兜底) */
@@ -237,20 +239,31 @@ nos_status_t nos_service_register_remote(uint32_t service_id, const char *uds_pa
 
 nos_status_t nos_scheduler_register_component(nos_thread_t *thread, nos_component_t *comp) {
     if (!thread || !comp) return NOS_ERR;
-    if (thread->component_count >= MAX_COMP_PER_THREAD) return NOS_ERR;
+    pthread_mutex_lock(&thread->component_lock);
+    if (thread->component_count >= MAX_COMP_PER_THREAD) {
+        pthread_mutex_unlock(&thread->component_lock);
+        return NOS_ERR;
+    }
     thread->components[thread->component_count++] = comp;
+    pthread_mutex_unlock(&thread->component_lock);
+
+    uint64_t val = 1;
+    if (write(thread->notify_fd, &val, sizeof(val)) < 0) { /* Ignore */ }
     return NOS_OK;
 }
 
 nos_status_t nos_scheduler_unregister_component(nos_thread_t *thread, nos_component_t *comp) {
     if (!thread || !comp) return NOS_ERR;
+    pthread_mutex_lock(&thread->component_lock);
     for (uint32_t i = 0; i < thread->component_count; i++) {
         if (thread->components[i] == comp) {
             thread->components[i] = thread->components[thread->component_count - 1];
             thread->component_count--;
+            pthread_mutex_unlock(&thread->component_lock);
             return NOS_OK;
         }
     }
+    pthread_mutex_unlock(&thread->component_lock);
     return NOS_ERR;
 }
 
@@ -339,11 +352,29 @@ static void process_thread_messages(nos_thread_t *self) {
 
         nos_service_msg_t *header = (nos_service_msg_t *)buf->data;
         service_entry_t *entry = find_service_entry(header->dst_service);
-        if (entry && entry->local_provider && entry->local_provider->on_msg) {
+        if (entry && entry->local_provider &&
+            entry->local_provider->status == NOS_COMP_ST_ACTIVE &&
+            entry->local_provider->on_msg) {
             entry->local_provider->on_msg(entry->local_provider, header);
         }
         nos_buffer_release(buf);
     }
+}
+
+static void start_pending_components(nos_thread_t *self) {
+    pthread_mutex_lock(&self->component_lock);
+    for (uint32_t i = 0; i < self->component_count; i++) {
+        nos_component_t *comp = self->components[i];
+        if (!comp || comp->status != NOS_COMP_ST_INITED) continue;
+
+        if (!comp->start || comp->start(comp) == NOS_OK) {
+            comp->status = NOS_COMP_ST_ACTIVE;
+        } else {
+            comp->status = NOS_COMP_ST_ERROR;
+            nos_sys_log_error("Component %s start failed", comp->name ? comp->name : "(unknown)");
+        }
+    }
+    pthread_mutex_unlock(&self->component_lock);
 }
 
 void nos_scheduler_stop(nos_thread_t *thread) {
@@ -356,12 +387,7 @@ void nos_scheduler_stop(nos_thread_t *thread) {
 
 nos_status_t nos_scheduler_run_loop(nos_thread_t *self) {
     if (!self) return NOS_ERR;
-    for (uint32_t i = 0; i < self->component_count; i++) {
-        nos_component_t *comp = self->components[i];
-        if (comp && comp->start && comp->status != NOS_COMP_ST_ACTIVE) {
-            if (comp->start(comp) == NOS_OK) comp->status = NOS_COMP_ST_ACTIVE;
-        }
-    }
+    start_pending_components(self);
     nos_sys_log_info("Thread '%s' loop started.", self->name);
     struct epoll_event events[MAX_EVENTS];
     extern nos_node_ctx_t g_node_ctx;
@@ -379,6 +405,7 @@ nos_status_t nos_scheduler_run_loop(nos_thread_t *self) {
         }
 
         if (spun || self->head != self->tail) {
+            start_pending_components(self);
             process_thread_messages(self);
             process_timers(self);
             
@@ -416,6 +443,7 @@ nos_status_t nos_scheduler_run_loop(nos_thread_t *self) {
         atomic_store_explicit(&self->is_sleeping, 0, memory_order_release);
         
         process_timers(self);
+        start_pending_components(self);
         
         for (int i = 0; i < nfds; i++) {
             nos_fd_entry_t *entry = (nos_fd_entry_t *)events[i].data.ptr;

@@ -44,6 +44,7 @@ typedef struct nos_thread_s {
     nos_buffer_t **msg_queue;
     int head, tail;
 
+    pthread_mutex_t component_lock; /**< 组件列表锁 */
     nos_component_t **components;
     uint32_t component_count;
 

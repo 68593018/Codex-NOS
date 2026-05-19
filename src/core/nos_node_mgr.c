@@ -14,9 +14,25 @@ nos_status_t nos_ipc_init(nos_thread_t *thread, const char *uds_path);
 nos_status_t nos_service_unregister_provider(uint32_t service_id);
 nos_status_t nos_service_register_provider_bind(uint32_t service_id, nos_component_t *provider, nos_thread_t *thread);
 
-static nos_component_t* node_load_component_internal(uint32_t id, const char *name, const char *lib_name, void **out_handle) {
+static void node_destroy_loaded_component(nos_component_t *comp, void *handle) {
+    if (!comp) {
+        if (handle) dlclose(handle);
+        return;
+    }
+
+    if (comp->status == NOS_COMP_ST_ACTIVE && comp->stop) {
+        comp->stop(comp);
+    }
+    comp->status = NOS_COMP_ST_STOPPED;
+    free((void*)comp->name);
+    free(comp);
+    if (handle) dlclose(handle);
+}
+
+static nos_component_t* node_load_component_staged(uint32_t id, const char *name, const char *lib_name, void **out_handle) {
     char lib_path[256];
     sprintf(lib_path, "./%s", lib_name);
+    *out_handle = NULL;
 
     void *handle = dlopen(lib_path, RTLD_NOW);
     if (!handle) {
@@ -35,17 +51,19 @@ static nos_component_t* node_load_component_internal(uint32_t id, const char *na
     if (!comp) { dlclose(handle); return NULL; }
     comp->id = id;
     comp->name = strdup(name);
+    comp->status = NOS_COMP_ST_LOADED;
 
     if (export_func(comp) != NOS_OK) {
         nos_sys_log_error("Component %s export failed", name);
-        free((void*)comp->name); free(comp); dlclose(handle);
+        comp->status = NOS_COMP_ST_ERROR;
+        node_destroy_loaded_component(comp, handle);
         return NULL;
     }
 
     if (comp->init && comp->init(comp) != NOS_OK) {
         nos_sys_log_error("Component %s init failed", name);
         comp->status = NOS_COMP_ST_ERROR;
-        free((void*)comp->name); free(comp); dlclose(handle);
+        node_destroy_loaded_component(comp, handle);
         return NULL;
     }
 
@@ -55,7 +73,7 @@ static nos_component_t* node_load_component_internal(uint32_t id, const char *na
     extern void nos_log_set_comp_info(uint32_t comp_id, const char *name);
     nos_log_set_comp_info(id, name);
 
-    nos_sys_log_info("Loaded %s (ID:%u) from %s", name, id, lib_name);
+    nos_sys_log_info("Staged %s (ID:%u) from %s", name, id, lib_name);
     return comp;
 }
 
@@ -83,17 +101,45 @@ void node_init_workers(const nos_node_def_t *node_def) {
         
         for (int j = 0; t_def->comp_ids[j] != 0 && j < MAX_COMPONENTS_PER_NODE; j++) {
             void *handle = NULL;
-            nos_component_t *comp = node_load_component_internal(t_def->comp_ids[j], t_def->comp_names[j], t_def->comp_models[j], &handle);
+            nos_component_t *comp = node_load_component_staged(t_def->comp_ids[j], t_def->comp_names[j], t_def->comp_models[j], &handle);
             if (comp) {
-                if (g_node_ctx.loaded_count < MAX_COMPONENTS_PER_NODE) {
-                    loaded_comp_info_t *info = &g_node_ctx.loaded_info[g_node_ctx.loaded_count++];
-                    info->comp = comp; info->handle = handle; info->lib_name = t_def->comp_models[j];
-                    info->owner_thread = thread;
+                if (g_node_ctx.loaded_count >= MAX_COMPONENTS_PER_NODE) {
+                    node_destroy_loaded_component(comp, handle);
+                    nos_sys_log_error("Component table full, failed to load %s", t_def->comp_names[j]);
+                    continue;
                 }
-                nos_scheduler_register_component(thread, comp);
+                if (nos_scheduler_register_component(thread, comp) != NOS_OK) {
+                    node_destroy_loaded_component(comp, handle);
+                    nos_sys_log_error("Scheduler registration failed for %s", t_def->comp_names[j]);
+                    continue;
+                }
+
+                loaded_comp_info_t *info = &g_node_ctx.loaded_info[g_node_ctx.loaded_count++];
+                info->comp = comp; info->handle = handle; info->lib_name = t_def->comp_models[j];
+                info->owner_thread = thread;
             }
         }
         g_node_ctx.worker_count++;
+    }
+}
+
+static void node_register_local_providers(uint32_t provider_id, nos_component_t *provider, nos_thread_t *thread) {
+    for (uint32_t i = 0; i < g_node_ctx.node_def->service_count; i++) {
+        const nos_service_def_t *svc = &g_node_ctx.node_def->services[i];
+        if (svc->provider_comp_id == provider_id &&
+            strcmp(svc->node_name, g_node_ctx.node_def->name) == 0) {
+            nos_service_register_provider_bind(svc->service_id, provider, thread);
+        }
+    }
+}
+
+static void node_unregister_local_providers(uint32_t provider_id) {
+    for (uint32_t i = 0; i < g_node_ctx.node_def->service_count; i++) {
+        const nos_service_def_t *svc = &g_node_ctx.node_def->services[i];
+        if (svc->provider_comp_id == provider_id &&
+            strcmp(svc->node_name, g_node_ctx.node_def->name) == 0) {
+            nos_service_unregister_provider(svc->service_id);
+        }
     }
 }
 
@@ -135,15 +181,8 @@ nos_status_t node_unload_component(const char *name) {
 
     loaded_comp_info_t *info = &g_node_ctx.loaded_info[idx];
     nos_scheduler_unregister_component(info->owner_thread, info->comp);
-    
-    for (uint32_t i = 0; i < g_node_ctx.node_def->service_count; i++) {
-        if (g_node_ctx.node_def->services[i].provider_comp_id == info->comp->id) {
-            nos_service_unregister_provider(g_node_ctx.node_def->services[i].service_id);
-        }
-    }
-
-    if (info->comp->stop) info->comp->stop(info->comp);
-    free((void*)info->comp->name); free(info->comp); dlclose(info->handle);
+    node_unregister_local_providers(info->comp->id);
+    node_destroy_loaded_component(info->comp, info->handle);
 
     for (uint32_t i = idx; i < g_node_ctx.loaded_count - 1; i++) g_node_ctx.loaded_info[i] = g_node_ctx.loaded_info[i+1];
     g_node_ctx.loaded_count--;
@@ -160,36 +199,46 @@ nos_status_t node_reload_component(const char *name) {
     }
     if (idx == -1) return NOS_ERR;
 
-    /* 关键修复：在 unload 之前必须深度拷贝元数据 */
-    uint32_t id = g_node_ctx.loaded_info[idx].comp->id;
-    char *lib_name = strdup(g_node_ctx.loaded_info[idx].lib_name);
-    char *comp_name = strdup(name);
-    nos_thread_t *thread = g_node_ctx.loaded_info[idx].owner_thread;
-
-    node_unload_component(name);
+    loaded_comp_info_t *old_info = &g_node_ctx.loaded_info[idx];
+    uint32_t id = old_info->comp->id;
+    const char *lib_name = old_info->lib_name;
+    nos_thread_t *thread = old_info->owner_thread;
 
     void *new_handle = NULL;
-    nos_component_t *new_comp = node_load_component_internal(id, comp_name, lib_name, &new_handle);
-    if (new_comp) {
-        if (g_node_ctx.loaded_count < MAX_COMPONENTS_PER_NODE) {
-            loaded_comp_info_t *info = &g_node_ctx.loaded_info[g_node_ctx.loaded_count++];
-            info->comp = new_comp; info->handle = new_handle; info->lib_name = lib_name; info->owner_thread = thread;
-            nos_scheduler_register_component(thread, new_comp);
-            /* 注意：此处不手动调用 start，让 run_loop 在下一次迭代自动触发 (确保在正确线程 context) */
-            for (uint32_t i = 0; i < g_node_ctx.node_def->service_count; i++) {
-                if (g_node_ctx.node_def->services[i].provider_comp_id == id &&
-                    strcmp(g_node_ctx.node_def->services[i].node_name, g_node_ctx.node_def->name) == 0) {
-                    nos_service_register_provider_bind(g_node_ctx.node_def->services[i].service_id, new_comp, thread);
-                }
-            }
-        }
+    nos_component_t *new_comp = node_load_component_staged(id, name, lib_name, &new_handle);
+    if (!new_comp) {
+        nos_sys_log_error("Component %s reload staged load failed; old component remains active.", name);
+        return NOS_ERR;
     }
-    
-    /* 这里的 lib_name 所有权已经转移给 info 或加载失败需释放 */
-    int found = 0;
-    for(uint32_t i=0; i<g_node_ctx.loaded_count; i++) if(g_node_ctx.loaded_info[i].lib_name == lib_name) found=1;
-    if(!found) free(lib_name);
-    free(comp_name);
-    
-    return (new_comp != NULL) ? NOS_OK : NOS_ERR;
+
+    nos_component_t *old_comp = old_info->comp;
+    void *old_handle = old_info->handle;
+
+    if (nos_scheduler_unregister_component(thread, old_comp) != NOS_OK) {
+        node_destroy_loaded_component(new_comp, new_handle);
+        nos_sys_log_error("Component %s reload failed: old component not registered.", name);
+        return NOS_ERR;
+    }
+
+    if (nos_scheduler_register_component(thread, new_comp) != NOS_OK) {
+        nos_scheduler_register_component(thread, old_comp);
+        node_destroy_loaded_component(new_comp, new_handle);
+        nos_sys_log_error("Component %s reload failed: new component registration failed.", name);
+        return NOS_ERR;
+    }
+
+    old_info->comp = new_comp;
+    old_info->handle = new_handle;
+    old_info->lib_name = lib_name;
+    old_info->owner_thread = thread;
+    node_register_local_providers(id, new_comp, thread);
+
+    if (old_comp->stop) old_comp->stop(old_comp);
+    old_comp->status = NOS_COMP_ST_STOPPED;
+    free((void*)old_comp->name);
+    free(old_comp);
+    dlclose(old_handle);
+
+    nos_sys_log_info("Component %s reloaded with staged swap.", name);
+    return NOS_OK;
 }
