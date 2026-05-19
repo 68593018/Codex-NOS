@@ -44,6 +44,13 @@ typedef struct {
     uint64_t next_retry_ms;
     uint32_t retry_delay_ms;
     uint32_t connect_fail_count;
+    uint64_t tx_packets;
+    uint64_t tx_bytes;
+    uint64_t tx_errors;
+    uint64_t rx_packets;
+    uint64_t rx_bytes;
+    uint64_t rx_errors;
+    uint64_t dropped_full;
     nos_thread_t *owner_thread; // 绑定的 IO 线程
 } nos_ipc_conn_t;
 
@@ -129,6 +136,28 @@ void nos_ipc_dump_stats(void) {
         pthread_mutex_unlock(&conn->lock);
     }
     pthread_mutex_unlock(&g_pool_lock);
+
+    printf("\n--- IPC Traffic ---\n");
+    printf("%-28s %-8s %-10s %-7s %-8s %-10s %-7s %-6s\n",
+           "Path", "TX-Pkts", "TX-Bytes", "TX-Err", "RX-Pkts", "RX-Bytes", "RX-Err", "Drop");
+    printf("------------------------------------------------------------------------------------------\n");
+
+    pthread_mutex_lock(&g_pool_lock);
+    for (uint32_t i = 0; i < g_remote_conn_count; i++) {
+        nos_ipc_conn_t *conn = &g_remote_conns[i];
+        pthread_mutex_lock(&conn->lock);
+        printf("%-28s %-8llu %-10llu %-7llu %-8llu %-10llu %-7llu %-6llu\n",
+               conn->uds_path,
+               (unsigned long long)conn->tx_packets,
+               (unsigned long long)conn->tx_bytes,
+               (unsigned long long)conn->tx_errors,
+               (unsigned long long)conn->rx_packets,
+               (unsigned long long)conn->rx_bytes,
+               (unsigned long long)conn->rx_errors,
+               (unsigned long long)conn->dropped_full);
+        pthread_mutex_unlock(&conn->lock);
+    }
+    pthread_mutex_unlock(&g_pool_lock);
 }
 
 static int nos_ipc_try_connect_locked(nos_ipc_conn_t *conn) {
@@ -183,6 +212,8 @@ static void nos_ipc_process_tx(nos_ipc_conn_t *conn) {
         if (sent == (ssize_t)full_len) {
             atomic_fetch_add(&g_node_ctx.stats.tx_packets, 1);
             atomic_fetch_add(&g_node_ctx.stats.tx_bytes, full_len);
+            conn->tx_packets++;
+            conn->tx_bytes += full_len;
             nos_buffer_release(buf);
             conn->head = (conn->head + 1) % TX_QUEUE_SIZE;
         } else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
@@ -193,6 +224,7 @@ static void nos_ipc_process_tx(nos_ipc_conn_t *conn) {
             /* 链路故障 */
             nos_sys_log_error("IPC remote send failed to %s: %s", conn->uds_path, strerror(errno));
             atomic_fetch_add(&g_node_ctx.stats.tx_errors, 1);
+            conn->tx_errors++;
             nos_ipc_mark_disconnected(conn);
             pthread_mutex_unlock(&conn->lock);
             return;
@@ -223,6 +255,7 @@ static void nos_ipc_recv_handler(int fd, nos_ipc_conn_t *conn, nos_thread_t *thr
 
     if (header_tmp.magic != NOS_IPC_MAGIC) {
         nos_sys_log_error("Protocol error: Invalid magic. Dropping link.");
+        if (conn) conn->rx_errors++;
         if (conn) {
             nos_ipc_mark_disconnected(conn);
         } else {
@@ -236,6 +269,7 @@ static void nos_ipc_recv_handler(int fd, nos_ipc_conn_t *conn, nos_thread_t *thr
     if (header_tmp.payload_len > NOS_IPC_MAX_PAYLOAD_LEN) {
         nos_sys_log_error("IPC payload too large: %u bytes", header_tmp.payload_len);
         atomic_fetch_add(&g_node_ctx.stats.rx_errors, 1);
+        if (conn) conn->rx_errors++;
         recv(fd, NULL, 0, MSG_TRUNC | MSG_DONTWAIT);
         return;
     }
@@ -243,6 +277,7 @@ static void nos_ipc_recv_handler(int fd, nos_ipc_conn_t *conn, nos_thread_t *thr
     nos_buffer_t *buf = nos_buffer_alloc(full_msg_len, 0);
     if (!buf) {
         atomic_fetch_add(&g_node_ctx.stats.buffer_alloc_fails, 1);
+        if (conn) conn->rx_errors++;
         recv(fd, NULL, 0, MSG_TRUNC | MSG_DONTWAIT); // 丢弃该包
         return;
     }
@@ -251,10 +286,15 @@ static void nos_ipc_recv_handler(int fd, nos_ipc_conn_t *conn, nos_thread_t *thr
     if (ret == (ssize_t)full_msg_len) {
         atomic_fetch_add(&g_node_ctx.stats.rx_packets, 1);
         atomic_fetch_add(&g_node_ctx.stats.rx_bytes, ret);
+        if (conn) {
+            conn->rx_packets++;
+            conn->rx_bytes += (uint64_t)ret;
+        }
         nos_service_msg_send(buf);
     } else {
         nos_sys_log_error("Partial recv or error on SEQPACKET.");
         atomic_fetch_add(&g_node_ctx.stats.rx_errors, 1);
+        if (conn) conn->rx_errors++;
     }
     nos_buffer_release(buf);
 }
@@ -299,6 +339,13 @@ static nos_ipc_conn_t* get_or_create_conn(const char *uds_path) {
     conn->next_retry_ms = 0;
     conn->retry_delay_ms = IPC_RETRY_INITIAL_MS;
     conn->connect_fail_count = 0;
+    conn->tx_packets = 0;
+    conn->tx_bytes = 0;
+    conn->tx_errors = 0;
+    conn->rx_packets = 0;
+    conn->rx_bytes = 0;
+    conn->rx_errors = 0;
+    conn->dropped_full = 0;
     pthread_mutex_init(&conn->lock, NULL);
     conn->owner_thread = g_node_ctx.mgmt_thread; // 统一由管理线程处理 IO
     
@@ -318,6 +365,7 @@ nos_status_t nos_ipc_send_enqueue(const char *uds_path, nos_buffer_t *buf) {
     /* 1. 入队 */
     uint32_t next_tail = (conn->tail + 1) % TX_QUEUE_SIZE;
     if (next_tail == conn->head) {
+        conn->dropped_full++;
         pthread_mutex_unlock(&conn->lock);
         atomic_fetch_add(&g_node_ctx.stats.dropped_full, 1);
         return NOS_ERR_BUSY;

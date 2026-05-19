@@ -146,7 +146,13 @@ class RuntimeReloadTest(unittest.TestCase):
         self.assertIn("IPC Connections", output)
         self.assertIn("/tmp/nos_proc_B.sock", output)
         self.assertIn("BACKOFF", output)
+        self.assertIn("IPC Traffic", output)
+        self.assertIn("TX-Pkts", output)
+        self.assertIn("TX-Err", output)
+        self.assertIn("RX-Pkts", output)
+        self.assertIn("Drop", output)
         self.assertRegex(output, r"/tmp/nos_proc_B\.sock\s+BACKOFF\s+-1\s+1")
+        self.assertRegex(output, r"/tmp/nos_proc_B\.sock\s+0\s+0\s+0\s+0\s+0\s+0\s+0")
 
 
 if __name__ == "__main__":
