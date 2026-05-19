@@ -8,8 +8,8 @@ typedef uint64_t (*nos_stats_gauge_read_fn)(void *arg);
 
 nos_status_t nos_stats_register_counter(const char *module, const char *name, const volatile uint64_t *value);
 nos_status_t nos_stats_register_gauge(const char *module, const char *name, nos_stats_gauge_read_fn read_fn, void *arg);
-void nos_stats_dump_all(void);
-void nos_stats_dump_module(const char *module);
+uint32_t nos_stats_dump_all(void);
+uint32_t nos_stats_dump_module(const char *module);
 void nos_stats_init(void);
 
 #endif /* __NOS_STATS_H__ */

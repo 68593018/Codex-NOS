@@ -171,6 +171,11 @@ class RuntimeReloadTest(unittest.TestCase):
         self.assertIn("total_memory_bytes", output)
         self.assertIn("scheduler", output)
         self.assertIn("NOS Stats: ipc", output)
+        ipc_stats = output.split("--- NOS Stats: ipc ---", 1)[1]
+        self.assertIn("tx_packets", ipc_stats)
+        self.assertIn("rx_packets", ipc_stats)
+        self.assertNotIn("dropped_messages", ipc_stats)
+        self.assertNotIn("total_memory_bytes", ipc_stats)
 
 
 if __name__ == "__main__":

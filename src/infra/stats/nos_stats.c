@@ -83,7 +83,9 @@ static uint64_t stats_read_item(const nos_stats_item_t *item) {
     return item->read_fn ? item->read_fn(item->arg) : 0;
 }
 
-static void stats_dump_locked(const char *module) {
+static uint32_t stats_dump_locked(const char *module) {
+    uint32_t matched = 0;
+
     printf("\n--- NOS Stats%s%s ---\n", module ? ": " : "", module ? module : "");
     printf("%-16s %-28s %-10s %-20s\n", "Module", "Name", "Type", "Value");
     printf("----------------------------------------------------------------------------\n");
@@ -91,22 +93,33 @@ static void stats_dump_locked(const char *module) {
     for (uint32_t i = 0; i < g_stats_count; i++) {
         nos_stats_item_t *item = &g_stats[i];
         if (module && strcmp(item->module, module) != 0) continue;
+        matched++;
         printf("%-16s %-28s %-10s %-20llu\n",
                item->module,
                item->name,
                item->type == NOS_STATS_COUNTER ? "counter" : "gauge",
                (unsigned long long)stats_read_item(item));
     }
+
+    if (matched == 0) {
+        printf("(no stats registered)\n");
+    }
+
+    return matched;
 }
 
-void nos_stats_dump_all(void) {
+uint32_t nos_stats_dump_all(void) {
+    uint32_t matched;
     pthread_mutex_lock(&g_stats_lock);
-    stats_dump_locked(NULL);
+    matched = stats_dump_locked(NULL);
     pthread_mutex_unlock(&g_stats_lock);
+    return matched;
 }
 
-void nos_stats_dump_module(const char *module) {
+uint32_t nos_stats_dump_module(const char *module) {
+    uint32_t matched;
     pthread_mutex_lock(&g_stats_lock);
-    stats_dump_locked(module);
+    matched = stats_dump_locked(module);
     pthread_mutex_unlock(&g_stats_lock);
+    return matched;
 }
