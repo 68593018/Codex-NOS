@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <dlfcn.h>
 #include "nos_node_mgr.h"
 #include "nos_node_priv.h"
@@ -33,6 +34,11 @@ static nos_component_t* node_load_component_staged(uint32_t id, const char *name
     char lib_path[256];
     sprintf(lib_path, "./%s", lib_name);
     *out_handle = NULL;
+
+    if (access(lib_path, R_OK) != 0) {
+        nos_sys_log_error("Component library %s is not readable", lib_path);
+        return NULL;
+    }
 
     void *handle = dlopen(lib_path, RTLD_NOW);
     if (!handle) {
