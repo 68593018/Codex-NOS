@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <termios.h>
 #include <unistd.h>
 #include "nos_cli.h"
@@ -225,17 +226,36 @@ static void do_perf_start(const char *args) {
     }
 }
 static void do_perf_remote_start(const char *args) {
-    uint32_t count = args ? (uint32_t)atoi(args) : 10000;
+    uint32_t count = 10000;
+    uint32_t payload_size = 0;
+    int sweep = 0;
+    if (args && args[0] != '\0') {
+        if (strncmp(args, "sweep", 5) == 0) {
+            sweep = 1;
+            if (sscanf(args + 5, "%u", &count) != 1) count = 10000;
+        } else {
+            int parsed = sscanf(args, "%u %u", &count, &payload_size);
+            if (parsed <= 0) count = 10000;
+        }
+    }
     if (count == 0) count = 10000;
-    nos_buffer_t *buf = nos_buffer_alloc(sizeof(nos_service_msg_t) + sizeof(uint32_t), 0);
+
+    if (sweep) payload_size = UINT32_MAX;
+    nos_buffer_t *buf = nos_buffer_alloc(sizeof(nos_service_msg_t) + sizeof(uint32_t) * 2, 0);
     if (buf) {
         nos_service_msg_t *msg = (nos_service_msg_t *)buf->data;
         msg->magic = NOS_IPC_MAGIC;
         msg->dst_service = 113; // SVC_REMOTE_PING (Comp-RemotePing)
         msg->msg_code = 3001; // START_TEST
-        msg->payload_len = sizeof(uint32_t);
-        memcpy(msg + 1, &count, sizeof(uint32_t));
-        printf("[CLI] Triggering cross-process performance test with %u iterations...\n", count);
+        msg->payload_len = sizeof(uint32_t) * 2;
+        uint32_t *payload = (uint32_t *)(msg + 1);
+        payload[0] = count;
+        payload[1] = payload_size;
+        printf("[CLI] Triggering cross-process performance test with %u iterations, %s%u%s...\n",
+               count,
+               sweep ? "payload sweep starting at " : "payload ",
+               sweep ? 32 : payload_size,
+               sweep ? " bytes" : " bytes");
         nos_service_msg_send(buf);
         nos_buffer_release(buf);
     }

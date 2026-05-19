@@ -5,6 +5,7 @@ profiles:
       - { size: 128,  count: 256 }
       - { size: 512,  count: 128 }
       - { size: 2048, count: 64 }
+      - { size: 4096, count: 64 }
 
   - name: "high_performance_data"
     bins:

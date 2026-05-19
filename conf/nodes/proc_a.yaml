@@ -1,7 +1,7 @@
 nodes:
   - name: "ProcA"
     uds_path: "/tmp/nos_proc_A.sock"
-    buffer_profile: "lite_mgmt"
+    buffer_profile: "default"
     busy_poll_cycles: 5000
     threads:
       - name: "Worker-1"
