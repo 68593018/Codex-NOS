@@ -9,6 +9,7 @@
 #include <sys/eventfd.h>
 #include <stdatomic.h>
 #include <errno.h>
+#include <limits.h>
 #include <time.h>
 #include "nos_scheduler.h"
 #include "nos_service.h"
@@ -138,6 +139,21 @@ size_t nos_scheduler_get_total_mem_usage(void) {
         total += get_thread_mem_usage(&g_node_ctx.worker_threads[i]);
     }
     return total;
+}
+
+static uint32_t scheduler_get_busy_poll_cycles(void) {
+    extern nos_node_ctx_t g_node_ctx;
+    uint32_t poll_cycles = (g_node_ctx.node_def) ? g_node_ctx.node_def->busy_poll_cycles : 500;
+    const char *override = getenv("NOS_BUSY_POLL_CYCLES");
+    if (!override || override[0] == '\0') return poll_cycles;
+
+    char *end = NULL;
+    errno = 0;
+    unsigned long value = strtoul(override, &end, 10);
+    if (errno != 0 || end == override || *end != '\0' || value > UINT_MAX) {
+        return poll_cycles;
+    }
+    return (uint32_t)value;
 }
 
 nos_status_t nos_scheduler_init_thread(nos_thread_t *thread, uint32_t id, const char *name) {
@@ -476,8 +492,7 @@ nos_status_t nos_scheduler_run_loop(nos_thread_t *self) {
     start_pending_components(self);
     nos_sys_log_info("Thread '%s' loop started.", self->name);
     struct epoll_event events[MAX_EVENTS];
-    extern nos_node_ctx_t g_node_ctx;
-    uint32_t poll_cycles = (g_node_ctx.node_def) ? g_node_ctx.node_def->busy_poll_cycles : 500;
+    uint32_t poll_cycles = scheduler_get_busy_poll_cycles();
     
     while (!self->stop_requested) {
         /* Busy spin to process messages without kernel intervention if possible */

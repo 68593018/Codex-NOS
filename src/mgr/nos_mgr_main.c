@@ -167,6 +167,7 @@ static void start_node(const char *name) {
     }
     if (pid == 0) {
         if (redirect_child_stdio(node->def->name) != 0) _exit(126);
+        setenv("NOS_BUSY_POLL_CYCLES", "0", 0);
         execl(node->def->binary, node->def->binary, (char *)NULL);
         _exit(127);
     }
