@@ -100,6 +100,54 @@ class GenManifestTest(unittest.TestCase):
         self.assertIn('.name = "ProcA"', generated["manifest"])
         self.assertIn("nos_log_init", generated["manifest"])
 
+    def test_manifest_includes_required_remote_service_route(self):
+        files = dict(BASE_CONFIG)
+        files["nodes.yaml"] = """
+            nodes:
+              - name: "ProcA"
+                uds_path: "/tmp/proc_a.sock"
+                buffer_profile: "default"
+                threads:
+                  - name: "Worker-1"
+                    components: ["Comp-A"]
+              - name: "ProcB"
+                uds_path: "/tmp/proc_b.sock"
+                buffer_profile: "default"
+                threads:
+                  - name: "Worker-1"
+                    components: ["Comp-B"]
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conf = root / "conf"
+            include = root / "include"
+            src_core = root / "src" / "core"
+            conf.mkdir()
+            include.mkdir()
+            src_core.mkdir(parents=True)
+
+            for name, content in files.items():
+                (conf / name).write_text(
+                    textwrap.dedent(content).strip() + "\n",
+                    encoding="utf-8",
+                )
+
+            result = subprocess.run(
+                [sys.executable, str(GEN_SCRIPT), str(conf), str(include / "nos_ids.h")],
+                cwd=REPO_ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            proc_b_manifest = (src_core / "manifest_ProcB.c").read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('.service_name = "SVC_WORK"', proc_b_manifest)
+        self.assertIn('.node_name = "ProcA"', proc_b_manifest)
+        self.assertIn('.remote_uds_path = "/tmp/proc_a.sock"', proc_b_manifest)
+
     def test_rejects_duplicate_component_id(self):
         files = dict(BASE_CONFIG)
         files["components.yaml"] = files["components.yaml"].replace("id: 11", "id: 10")
