@@ -16,6 +16,7 @@ CORE_SRCS = src/core/nos_scheduler.c \
             src/infra/log/nos_log.c \
             src/infra/db/nos_kv.c \
             src/infra/timer/nos_timer.c \
+            src/infra/shm/nos_shm_ipc.c \
             src/infra/stats/nos_stats.c \
             src/core/nos_node_main.c
 
@@ -72,7 +73,7 @@ libcomp-rpong.so: src/components/perf/remote_pong.c include/nos_ids.h $(HEADERS)
 	@$(CC) $(CFLAGS) -shared $< -o $@
 
 clean:
-	rm -f nos_Proc* nos_mgr libcomp-*.so include/nos_ids.h src/core/manifest_*.c src/mgr/manifest_mgr.c src/core/*.o src/mgr/*.o src/infra/*.o src/infra/*/*.o
+	rm -f nos_Proc* nos_mgr libcomp-*.so include/nos_ids.h src/core/manifest_*.c src/mgr/manifest_mgr.c src/core/*.o src/mgr/*.o src/infra/*.o src/infra/*/*.o src/infra/*/*/*.o
 
 test: all
 	@$(PYTHON) -m unittest discover -s tests

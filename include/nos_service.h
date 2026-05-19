@@ -9,6 +9,7 @@
 
 #define NOS_MSG_F_NEED_REPLY 0x00000001u
 #define NOS_MSG_F_REPLY      0x00000002u
+#define NOS_MSG_F_IPC_CTRL   0x80000000u
 
 typedef struct nos_reply_ctx_s nos_reply_ctx_t;
 
@@ -50,7 +51,7 @@ void nos_reply_ctx_release(nos_reply_ctx_t *ctx);
  * @param service_id 服务 ID
  * @param uds_path 目标进程监听的 UDS 路径
  */
-nos_status_t nos_service_register_remote(uint32_t service_id, const char *uds_path);
+nos_status_t nos_service_register_remote(uint32_t service_id, const char *node_name, const char *uds_path);
 
 /**
  * @brief 嵌入式服务获取接口

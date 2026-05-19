@@ -6,11 +6,13 @@ profiles:
       - { size: 512,  count: 128 }
       - { size: 2048, count: 64 }
       - { size: 4096, count: 64 }
+      - { size: 8192, count: 32 }
 
   - name: "high_performance_data"
     bins:
       - { size: 2048, count: 512 }
       - { size: 4096, count: 256 }
+      - { size: 8192, count: 128 }
 
   - name: "lite_mgmt"
     bins:

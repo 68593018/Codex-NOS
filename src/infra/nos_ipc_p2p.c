@@ -16,12 +16,15 @@
 #include "nos_api.h"
 #include "nos_node_priv.h"
 #include "nos_stats.h"
+#include "nos_shm_ipc.h"
 
 #define TX_QUEUE_SIZE 1024
 #define MAX_REMOTE_CONNS 16
 #define NOS_IPC_MAX_PAYLOAD_LEN 4096
 #define IPC_RETRY_INITIAL_MS 100
 #define IPC_RETRY_MAX_MS 5000
+#define NOS_IPC_CTRL_SHM_SETUP 0x53484D31u
+#define NOS_IPC_CTRL_SHM_NOTIFY 0x53484D32u
 
 typedef enum {
     NOS_IPC_DISCONNECTED = 0,
@@ -54,8 +57,16 @@ typedef struct {
     uint64_t dropped_full;
     uint32_t generation;
     int is_passive;
+    char remote_node[32];
+    char shm_name[NOS_SHM_NAME_MAX];
+    nos_shm_channel_t *shm;
     nos_thread_t *owner_thread; // 绑定的 IO 线程
 } nos_ipc_conn_t;
+
+typedef struct {
+    char shm_name[NOS_SHM_NAME_MAX];
+    char peer_node[32];
+} nos_ipc_shm_setup_t;
 
 static nos_ipc_conn_t g_remote_conns[MAX_REMOTE_CONNS];
 static uint32_t g_remote_conn_count = 0;
@@ -70,6 +81,30 @@ void nos_ipc_register_stats(void) {
     nos_stats_register_counter("ipc", "rx_errors", (const volatile uint64_t *)&g_node_ctx.stats.rx_errors);
     nos_stats_register_counter("ipc", "dropped_full", (const volatile uint64_t *)&g_node_ctx.stats.dropped_full);
     nos_stats_register_counter("ipc", "buffer_alloc_fails", (const volatile uint64_t *)&g_node_ctx.stats.buffer_alloc_fails);
+    nos_shm_register_stats();
+}
+
+static int ipc_is_ctrl_msg(const nos_service_msg_t *msg) {
+    return msg && (msg->flags & NOS_MSG_F_IPC_CTRL);
+}
+
+static void ipc_make_shm_name(char *out, size_t out_size, const char *local, const char *remote) {
+    snprintf(out, out_size, "/nos_shm_%s_%s", local ? local : "local", remote ? remote : "remote");
+}
+
+static void ipc_send_ctrl(int fd, uint32_t code, const void *payload, uint32_t payload_len) {
+    uint8_t data[sizeof(nos_service_msg_t) + sizeof(nos_ipc_shm_setup_t)];
+    if (payload_len > sizeof(nos_ipc_shm_setup_t)) return;
+    memset(data, 0, sizeof(data));
+    nos_service_msg_t *msg = (nos_service_msg_t *)data;
+    msg->magic = NOS_IPC_MAGIC;
+    msg->version = NOS_IPC_VERSION;
+    msg->dst_service = 0;
+    msg->msg_code = code;
+    msg->flags = NOS_MSG_F_IPC_CTRL;
+    msg->payload_len = payload_len;
+    if (payload && payload_len > 0) memcpy(msg + 1, payload, payload_len);
+    (void)send(fd, data, sizeof(nos_service_msg_t) + payload_len, MSG_NOSIGNAL | MSG_DONTWAIT);
 }
 
 static uint64_t ipc_monotonic_ms(void) {
@@ -98,6 +133,10 @@ static void nos_ipc_mark_disconnected(nos_ipc_conn_t *conn) {
     if (conn->fd >= 0) {
         nos_scheduler_remove_fd(conn->owner_thread, conn->fd);
         close(conn->fd);
+    }
+    if (conn->shm) {
+        nos_shm_channel_close(conn->shm);
+        conn->shm = NULL;
     }
     conn->fd = -1;
     conn->is_connected = 0;
@@ -203,6 +242,15 @@ static int nos_ipc_try_connect_locked(nos_ipc_conn_t *conn) {
     conn->next_retry_ms = 0;
     conn->connect_fail_count = 0;
     nos_scheduler_add_fd_ex(conn->owner_thread, fd, EPOLLIN | EPOLLOUT | EPOLLET, nos_ipc_event_handler, conn);
+    if (!conn->shm && conn->remote_node[0] != '\0' && g_node_ctx.node_def) {
+        nos_ipc_shm_setup_t setup;
+        memset(&setup, 0, sizeof(setup));
+        ipc_make_shm_name(conn->shm_name, sizeof(conn->shm_name), g_node_ctx.node_def->name, conn->remote_node);
+        strncpy(setup.shm_name, conn->shm_name, sizeof(setup.shm_name) - 1);
+        strncpy(setup.peer_node, g_node_ctx.node_def->name, sizeof(setup.peer_node) - 1);
+        conn->shm = nos_shm_channel_create(conn->shm_name, 1);
+        if (conn->shm) ipc_send_ctrl(conn->fd, NOS_IPC_CTRL_SHM_SETUP, &setup, sizeof(setup));
+    }
     nos_sys_log_info("IPC connected to %s (FD:%d)", conn->uds_path, fd);
     return 1;
 }
@@ -220,6 +268,17 @@ static void nos_ipc_process_tx(nos_ipc_conn_t *conn) {
         nos_buffer_t *buf = conn->tx_queue[conn->head];
         nos_service_msg_t *header = (nos_service_msg_t *)buf->data;
         size_t full_len = sizeof(nos_service_msg_t) + header->payload_len;
+
+        if (!ipc_is_ctrl_msg(header) && conn->shm &&
+            full_len <= NOS_SHM_SLOT_SIZE &&
+            nos_shm_channel_write(conn->shm, buf->data, (uint32_t)full_len) == NOS_OK) {
+            ipc_send_ctrl(conn->fd, NOS_IPC_CTRL_SHM_NOTIFY, NULL, 0);
+            conn->tx_packets++;
+            conn->tx_bytes += full_len;
+            nos_buffer_release(buf);
+            conn->head = (conn->head + 1) % TX_QUEUE_SIZE;
+            continue;
+        }
 
         /* SEQPACKET 保证原子写入整个报文 */
         ssize_t sent = send(conn->fd, buf->data, full_len, MSG_NOSIGNAL | MSG_DONTWAIT);
@@ -274,6 +333,67 @@ nos_status_t nos_ipc_send_reply(void *reply_conn, uint32_t generation, nos_buffe
     return NOS_OK;
 }
 
+static void ipc_deliver_rx_data(const void *data, uint32_t len, nos_ipc_conn_t *conn) {
+    if (!data || len < sizeof(nos_service_msg_t)) return;
+    const nos_service_msg_t *header = (const nos_service_msg_t *)data;
+    if (header->payload_len > NOS_IPC_MAX_PAYLOAD_LEN) {
+        nos_sys_log_error("IPC payload too large: %u bytes", header->payload_len);
+        atomic_fetch_add(&g_node_ctx.stats.rx_errors, 1);
+        if (conn) conn->rx_errors++;
+        return;
+    }
+
+    size_t full_msg_len = sizeof(nos_service_msg_t) + header->payload_len;
+    if (len != full_msg_len) {
+        nos_sys_log_error("IPC message length mismatch: got %u expected %zu", len, full_msg_len);
+        atomic_fetch_add(&g_node_ctx.stats.rx_errors, 1);
+        if (conn) conn->rx_errors++;
+        return;
+    }
+
+    nos_buffer_t *buf = nos_buffer_alloc((uint32_t)full_msg_len, 0);
+    if (!buf) {
+        atomic_fetch_add(&g_node_ctx.stats.buffer_alloc_fails, 1);
+        if (conn) conn->rx_errors++;
+        return;
+    }
+
+    memcpy(buf->data, data, full_msg_len);
+    if (conn) {
+        extern nos_reply_ctx_t* nos_reply_ctx_create(void *ipc_conn, uint32_t ipc_generation, uint32_t corr_id, uint32_t requester_component);
+        buf->reply_ctx = nos_reply_ctx_create(conn, conn->generation, header->seq, header->src_component);
+        conn->rx_packets++;
+        conn->rx_bytes += (uint64_t)full_msg_len;
+    }
+    atomic_fetch_add(&g_node_ctx.stats.rx_packets, 1);
+    atomic_fetch_add(&g_node_ctx.stats.rx_bytes, full_msg_len);
+    nos_service_msg_send(buf);
+    nos_buffer_release(buf);
+}
+
+static void ipc_shm_drain_cb(const void *data, uint32_t len, void *arg) {
+    ipc_deliver_rx_data(data, len, (nos_ipc_conn_t *)arg);
+}
+
+static void ipc_handle_ctrl_msg(nos_ipc_conn_t *conn, const nos_service_msg_t *msg) {
+    if (!conn || !msg) return;
+    if (msg->msg_code == NOS_IPC_CTRL_SHM_SETUP && msg->payload_len >= sizeof(nos_ipc_shm_setup_t)) {
+        const nos_ipc_shm_setup_t *setup = (const nos_ipc_shm_setup_t *)(msg + 1);
+        strncpy(conn->remote_node, setup->peer_node, sizeof(conn->remote_node) - 1);
+        strncpy(conn->shm_name, setup->shm_name, sizeof(conn->shm_name) - 1);
+        if (!conn->shm) {
+            conn->shm = nos_shm_channel_open(conn->shm_name, 0);
+            if (conn->shm) {
+                nos_sys_log_info("IPC SHM channel attached: %s peer=%s", conn->shm_name, conn->remote_node);
+            }
+        }
+    } else if (msg->msg_code == NOS_IPC_CTRL_SHM_NOTIFY) {
+        if (conn->shm) {
+            nos_shm_channel_drain(conn->shm, ipc_shm_drain_cb, conn);
+        }
+    }
+}
+
 /**
  * @brief 接收报文并处理 (支持主动/被动连接)
  */
@@ -325,17 +445,12 @@ static void nos_ipc_recv_handler(int fd, nos_ipc_conn_t *conn, nos_thread_t *thr
 
     ssize_t ret = recv(fd, buf->data, full_msg_len, MSG_DONTWAIT);
     if (ret == (ssize_t)full_msg_len) {
-        if (conn) {
-            extern nos_reply_ctx_t* nos_reply_ctx_create(void *ipc_conn, uint32_t ipc_generation, uint32_t corr_id, uint32_t requester_component);
-            buf->reply_ctx = nos_reply_ctx_create(conn, conn->generation, header_tmp.seq, header_tmp.src_component);
+        nos_service_msg_t *rx_msg = (nos_service_msg_t *)buf->data;
+        if (ipc_is_ctrl_msg(rx_msg)) {
+            ipc_handle_ctrl_msg(conn, rx_msg);
+        } else {
+            ipc_deliver_rx_data(buf->data, (uint32_t)ret, conn);
         }
-        atomic_fetch_add(&g_node_ctx.stats.rx_packets, 1);
-        atomic_fetch_add(&g_node_ctx.stats.rx_bytes, ret);
-        if (conn) {
-            conn->rx_packets++;
-            conn->rx_bytes += (uint64_t)ret;
-        }
-        nos_service_msg_send(buf);
     } else {
         nos_sys_log_error("Partial recv or error on SEQPACKET.");
         atomic_fetch_add(&g_node_ctx.stats.rx_errors, 1);
@@ -362,7 +477,7 @@ static void nos_ipc_event_handler(int fd, void *arg) {
 /**
  * @brief 内部函数：获取或建立跨进程连接
  */
-static nos_ipc_conn_t* get_or_create_conn(const char *uds_path) {
+static nos_ipc_conn_t* get_or_create_conn(const char *node_name, const char *uds_path) {
     pthread_mutex_lock(&g_pool_lock);
     for (uint32_t i = 0; i < g_remote_conn_count; i++) {
         if (strcmp(g_remote_conns[i].uds_path, uds_path) == 0) {
@@ -377,6 +492,7 @@ static nos_ipc_conn_t* get_or_create_conn(const char *uds_path) {
 
     nos_ipc_conn_t *conn = &g_remote_conns[g_remote_conn_count++];
     strncpy(conn->uds_path, uds_path, 107);
+    if (node_name) strncpy(conn->remote_node, node_name, sizeof(conn->remote_node) - 1);
     conn->fd = -1;
     conn->head = conn->tail = 0;
     conn->is_connected = 0;
@@ -435,8 +551,8 @@ static nos_ipc_conn_t* create_passive_conn(int fd, nos_thread_t *thread) {
 /**
  * @brief 异步发送入队接口 (组件线程调用)
  */
-nos_status_t nos_ipc_send_enqueue(const char *uds_path, nos_buffer_t *buf) {
-    nos_ipc_conn_t *conn = get_or_create_conn(uds_path);
+nos_status_t nos_ipc_send_enqueue(const char *node_name, const char *uds_path, nos_buffer_t *buf) {
+    nos_ipc_conn_t *conn = get_or_create_conn(node_name, uds_path);
     if (!conn) return NOS_ERR;
 
     pthread_mutex_lock(&conn->lock);

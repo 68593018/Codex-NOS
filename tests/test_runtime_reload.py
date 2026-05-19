@@ -205,7 +205,10 @@ class RuntimeReloadTest(unittest.TestCase):
             if not self.socket_is_listening("/tmp/nos_proc_B.sock"):
                 self.skipTest("UDS listener is not available in this environment")
 
-            rc, output = self.run_node_commands(["perf remote 10 128"], timeout=10)
+            rc, output = self.run_node_commands([
+                "perf remote 10 128",
+                "show stats shm",
+            ], timeout=10)
 
             self.assertEqual(rc, 0, output)
             self.assertIn("Cross-Process Perf Test Started: 10 iterations, payload 128 bytes", output)
@@ -213,6 +216,11 @@ class RuntimeReloadTest(unittest.TestCase):
             self.assertIn("Total Time:", output)
             self.assertIn("Packets/sec:", output)
             self.assertIn("Throughput:", output)
+            self.assertIn("NOS Stats: shm", output)
+            self.assertIn("tx_packets", output)
+            self.assertIn("rx_packets", output)
+            self.assertRegex(output, r"tx_packets\s+counter\s+[1-9][0-9]*")
+            self.assertRegex(output, r"rx_packets\s+counter\s+[1-9][0-9]*")
         finally:
             if proc_b.poll() is None:
                 try:
